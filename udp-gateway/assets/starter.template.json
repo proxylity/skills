@@ -1,0 +1,141 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Transform": "AWS::Serverless-2016-10-31",
+  "Description": "Starter template for a Proxylity UDP Gateway service with a Lambda destination. Replace the inline handler with your own logic. You must be subscribed to Proxylity UDP Gateway on AWS Marketplace to deploy this template.",
+
+  "Parameters": {
+    "ClientCidrToAllow": {
+      "Type": "String",
+      "Default": "0.0.0.0/0",
+      "Description": "CIDR of clients allowed to send packets to this listener. Use a specific CIDR in production. REQUIRED — omitting ClientRestrictions blocks all traffic."
+    }
+  },
+
+  "Mappings": {
+    "ProxylityConfig": {
+      "Fn::Transform": {
+        "Name": "AWS::Include",
+        "Parameters": {
+          "Location": {
+            "Fn::Sub": "s3://proxylity-config-${AWS::Region}/${AWS::AccountId}/customer-config.json"
+          }
+        }
+      }
+    }
+  },
+
+  "Resources": {
+
+    "PacketHandler": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "Policies": ["AWSLambdaBasicExecutionRole"],
+        "Runtime": "nodejs22.x",
+        "Handler": "index.handler",
+        "MemorySize": 512,
+        "Timeout": 10,
+        "InlineCode": {
+          "Fn::Join": ["\n", [
+            "// Starter handler — replace with your own logic.",
+            "// event.Messages is an array of RequestPacket objects.",
+            "// Return { Replies: [...] } to send UDP responses, or { Replies: [] } for fire-and-forget.",
+            "exports.handler = async (event) => {",
+            "  console.log('Received', event.Messages.length, 'packets');",
+            "  for (const msg of event.Messages) {",
+            "    const bytes = Buffer.from(msg.Data, 'base64');",
+            "    console.log(`From ${msg.Remote.IpAddress}:${msg.Remote.Port} — ${bytes.length} bytes`);",
+            "  }",
+            "  // Echo the first packet back as an example response.",
+            "  // Remove or replace the Replies array for your use case.",
+            "  const replies = [{ Tag: event.Messages[0].Tag, Data: event.Messages[0].Data }];",
+            "  return { Replies: replies };",
+            "};"
+          ]}
+        }
+      }
+    },
+
+    "DestinationRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": {
+                "Fn::FindInMap": ["ProxylityConfig", { "Ref": "AWS::Region" }, "ServiceRole"]
+              }
+            },
+            "Action": "sts:AssumeRole"
+          }]
+        },
+        "Policies": [{
+          "PolicyName": "AllowLambdaAndMetrics",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": ["lambda:InvokeFunction"],
+                "Resource": [{ "Fn::GetAtt": ["PacketHandler", "Arn"] }]
+              },
+              {
+                "Effect": "Allow",
+                "Action": ["cloudwatch:PutMetricData"],
+                "Resource": "*"
+              }
+            ]
+          }
+        }]
+      }
+    },
+
+    "UdpListener": {
+      "Type": "Custom::ProxylityUdpGatewayListener",
+      "Properties": {
+        "ServiceToken": {
+          "Fn::FindInMap": ["ProxylityConfig", { "Ref": "AWS::Region" }, "ServiceToken"]
+        },
+        "ApiKey": {
+          "Fn::FindInMap": ["ProxylityConfig", "Account", "ApiKey"]
+        },
+        "Protocols": ["udp"],
+        "ClientRestrictions": {
+          "Networks": [{ "Ref": "ClientCidrToAllow" }]
+        },
+        "Destinations": [{
+          "Description": "Delivers packets to the starter Lambda handler.",
+          "DestinationArn": { "Fn::GetAtt": ["PacketHandler", "Arn"] },
+          "Role": { "Arn": { "Fn::GetAtt": ["DestinationRole", "Arn"] } },
+          "Batching": {
+            "Count": 1000,
+            "TimeoutInSeconds": 1
+          },
+          "Formatter": "base64",
+          "MetricsEnabled": true
+        }]
+      }
+    }
+
+  },
+
+  "Outputs": {
+    "Endpoint": {
+      "Description": "UDP endpoint to send packets to (domain:port).",
+      "Value": { "Fn::Sub": "${UdpListener.Domain}.proxylity.com:${UdpListener.Port}" }
+    },
+    "Domain": {
+      "Description": "Ingress domain for the listener.",
+      "Value": { "Fn::Sub": "${UdpListener.Domain}.proxylity.com" }
+    },
+    "Port": {
+      "Description": "UDP port for the listener.",
+      "Value": { "Fn::GetAtt": ["UdpListener", "Port"] }
+    },
+    "LambdaFunction": {
+      "Description": "Lambda function ARN.",
+      "Value": { "Fn::GetAtt": ["PacketHandler", "Arn"] }
+    }
+  }
+}
