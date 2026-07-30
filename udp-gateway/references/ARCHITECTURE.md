@@ -171,8 +171,8 @@ WireGuard provides encrypted UDP tunneling. The listener terminates the WireGuar
     "ApiKey": "...",
     "Protocols": ["wg"],
     "Peers": [
-      { "PublicKey": "<base64-encoded client public key>", "Description": "Site 1" },
-      { "PublicKey": "<base64-encoded client public key>", "Description": "Site 2" }
+      { "PublicKey": "<base64-encoded client public key>", "AllowedIPs": ["10.0.0.1/32"] },
+      { "PublicKey": "<base64-encoded client public key>", "AllowedIPs": ["10.0.0.2/32"] }
     ],
     "DecapsulatedDelivery": true,
     "ClientRestrictions": { "Networks": ["10.0.0.0/8"] },
@@ -184,6 +184,7 @@ WireGuard provides encrypted UDP tunneling. The listener terminates the WireGuar
 - `WireGuardPublicKey` return value: the server's public key to configure in the client's WireGuard config.
 - `DecapsulatedDelivery: true`: strips WireGuard headers; Lambda receives the inner UDP payload identically to a plain UDP listener. The `Inner` field in the packet JSON provides the inner IP/port metadata.
 - Without `DecapsulatedDelivery`, Lambda receives the outer WireGuard UDP packet.
+- Each `Peer` entry supports `PublicKey` (required), `AllowedIPs` (list of CIDRs the peer may send from), and `SharedSecret` (optional per-peer PSK for post-quantum resistance).
 
 ### Open WireGuard (public endpoint)
 
@@ -225,7 +226,8 @@ Batching controls how Proxylity groups packets before invoking your destination.
 | Property | Description | Default |
 |---|---|---|
 | `Count` | Maximum packets per invocation | 1 |
-| `TimeoutInSeconds` | Maximum wait time before flush | 1 |
+| `TimeoutInSeconds` | Maximum wait before flush | 1 |
+| `SizeInMB` | Maximum total base64-encoded payload size per batch (advisory — at least one packet is always included) | — |
 
 A batch is dispatched when either limit is reached, whichever comes first.
 
@@ -307,7 +309,7 @@ See `coap-time-service/` and `coap-demo/` in the examples repository for complet
 
 ## Destination Error Logging
 
-Add a `LogGroupArn` to a destination to capture delivery errors separately from application logs:
+Add a `LogGroupName` to a destination to capture delivery errors separately from application logs:
 
 ```json
 "Destinations": [{

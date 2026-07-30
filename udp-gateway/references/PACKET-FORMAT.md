@@ -6,6 +6,8 @@
 |---|---|---|
 | Lambda | JSON object: `{ "Messages": [RequestPacket, ...] }` | JSON object: `{ "Replies": [ResponsePacket, ...] }` |
 | Step Functions Express | JSON object: `{ "Messages": [RequestPacket, ...] }` | JSON object: `{ "Replies": [ResponsePacket, ...] }` |
+| API Gateway | JSON object: `{ "Messages": [RequestPacket, ...] }` | JSON object: `{ "Replies": [ResponsePacket, ...] }` |
+| SNS | One JSON-encoded `RequestPacket` per message | Not applicable (write-only) |
 | SQS (standard or FIFO) | One JSON-encoded `RequestPacket` per SQS message | Not applicable (write-only) |
 | EventBridge | One `RequestPacket` per event; assigned to `detail` field; `source` = `"proxylity"`, `detail-type` = `"udp-gateway-packet-ingress"` | Not applicable |
 | DynamoDB | One record per `RequestPacket`; primary key = src/dst tuple; sort key = arrival timestamp; packet properties mapped to attributes | Not applicable |
@@ -14,7 +16,6 @@
 | CloudWatch Logs | Packet `Data` as UTF-8 string; one log event per `RequestPacket` | Not applicable |
 | IoT Core (static mode) | One JSON-encoded `RequestPacket` per MQTT message | Not applicable |
 | IoT Core (dynamic mode) | Raw binary payload, no JSON wrapping | Not applicable |
-| API Gateway | HTTP POST with `RequestPacket` as JSON body | HTTP response body used as reply `Data` |
 
 ---
 
