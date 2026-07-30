@@ -240,7 +240,7 @@ Messages with the same message group ID are delivered in order. See ARCHITECTURE
   "Role": { "Arn": "..." },
   "Arguments": {
     "PartitionKeyExpression": "[0:4]",
-    "PartitionKeyFormatter": "hex"
+    "PartitionKeyExpressionFormatter": "hex"
   },
   "Batching": { "Count": 500, "TimeoutInSeconds": 1 }
 }

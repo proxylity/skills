@@ -40,6 +40,7 @@ All examples are in the [proxylity/examples](https://github.com/proxylity/exampl
 - `Custom::ProxylityUdpGatewayPacketSource` for server-initiated UDP delivery (Observe)
 - DynamoDB table for subscription registry with TTL
 - SNS topic as the PacketSource outbound channel
+- `EgressRegion` SNS message attribute set to the subscriber's ingress region
 - CloudWatch logging for state machine executions
 
 **Architecture**: CoAP requests → WireGuard listener → Step Functions Express → DynamoDB (read/write subscriptions) → SNS PacketSource (push time updates to subscribers).
@@ -117,7 +118,7 @@ All examples are in the [proxylity/examples](https://github.com/proxylity/exampl
 **What it demonstrates:**
 - Kinesis Data Stream destination
 - `PartitionKeyExpression` (BREX) for shard routing
-- `PartitionKeyFormatter: hex`
+- `PartitionKeyExpressionFormatter: hex`
 - `ShardCount` as a CloudFormation parameter
 - Separate CloudWatch Log Group for destination errors
 

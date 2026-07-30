@@ -105,7 +105,7 @@ Examples:
 
 ### Key Formatters
 
-Applied after extraction to convert bytes to a string. Set via `Arguments.MessageGroupIdFormatter` (SQS FIFO) or `Arguments.PartitionKeyFormatter` (Kinesis):
+Applied after extraction to convert bytes to a string. Set via `Arguments.MessageGroupIdFormatter` (SQS FIFO) or `Arguments.PartitionKeyExpressionFormatter` (Kinesis):
 
 | Value | Description |
 |---|---|
@@ -247,28 +247,61 @@ Reduce Lambda costs by increasing `Count` — fewer invocations = fewer charges.
 
 `Custom::ProxylityUdpGatewayPacketSource` lets your application push UDP packets to connected clients without waiting for an inbound request. Used for CoAP Observe notifications, server-push gaming updates, and any publish/subscribe pattern.
 
+A PacketSource is a **regional resource** — deploy one per AWS region where you need egress capability. The SNS topic must be in the same region as the PacketSource stack. Packets egress through that region's Proxylity infrastructure, directed by the `EgressRegion` SNS message attribute on each publish.
+
 ```json
 "PacketSource": {
   "Type": "Custom::ProxylityUdpGatewayPacketSource",
   "Properties": {
     "ServiceToken": { "Fn::FindInMap": ["ProxylityConfig", {"Ref": "AWS::Region"}, "ServiceToken"] },
     "ApiKey":       { "Fn::FindInMap": ["ProxylityConfig", "Account", "ApiKey"] },
-    "ListenerId":   { "Fn::GetAtt": ["UdpListener", "Id"] },
-    "TopicArn":     { "Ref": "OutboundTopic" }
+    "ListenerName": { "Ref": "UdpListener" },
+    "SnsTopicSource": {
+      "TopicArn": { "Ref": "OutboundTopic" },
+      "Role":     { "Fn::GetAtt": ["PacketSourceRole", "Arn"] }
+    }
   }
 }
 ```
 
-Publish to the SNS topic to deliver packets to clients:
+`SnsTopicSource.Role` is an IAM role that Proxylity assumes to subscribe its delivery queues to the topic. Its policy must grant `sns:Subscribe`, `sns:Unsubscribe`, and `sns:ListSubscriptionsByTopic` on the topic resource. Use `DependsOn` on the PacketSource resource to ensure the policy is attached before CloudFormation attempts to create it.
+
+### SNS message format
+
+Publish a JSON object with a `Messages` array to the SNS topic. Each entry is one UDP packet:
 
 ```json
 {
-  "Remote": { "IpAddress": "1.2.3.4", "Port": 5678 },
-  "Data": "<base64-encoded payload>"
+  "Messages": [{
+    "Remote": { "Address": "1.2.3.4", "Port": 5678 },
+    "Data": "<base64-encoded payload>"
+  }]
 }
 ```
 
-The SNS topic is the outbound delivery channel. The Lambda or Step Functions state machine publishes to it when it needs to push data to a client. See `coap-time-service/` for a complete observe + notify implementation.
+### EgressRegion — required message attribute
+
+Every SNS publish **must** include an `EgressRegion` message attribute. Proxylity subscribes one delivery queue per supported region, each filtered on this attribute. A publish without a matching `EgressRegion` attribute is silently discarded — no packet is delivered.
+
+```python
+sns.publish(
+    TopicArn="...",
+    MessageAttributes={
+        "EgressRegion": {"DataType": "String", "StringValue": "us-east-1"}
+    },
+    Message=json.dumps({"Messages": [...]})
+)
+```
+
+For replies to inbound packets, set `EgressRegion` to the `IngressRegion` field from the original packet JSON envelope — this ensures the reply exits from the same region the client's traffic entered, which is required for WireGuard session compatibility.
+
+For proactive pushes not triggered by an inbound packet, choose the region nearest to the target clients.
+
+### WireGuard listeners
+
+For WireGuard listeners, also set `Remote.PeerKey` to the peer's base64-encoded WireGuard public key. For listeners with `DecapsulatedDelivery: true`, include an `Inner` block with inner IP/port addressing.
+
+See `coap-time-service/` and `coap-demo/` in the examples repository for complete observe + notify implementations.
 
 ---
 
@@ -280,9 +313,9 @@ Add a `LogGroupArn` to a destination to capture delivery errors separately from 
 "Destinations": [{
   "DestinationArn": "...",
   "Role": { "Arn": "..." },
-  "LogGroupArn": { "Fn::GetAtt": ["DestinationErrorLogs", "Arn"] },
+  "LogGroupName": { "Ref": "DestinationErrorLogs" },
   "MetricsEnabled": true
 }]
 ```
 
-This is strongly recommended for production deployments to distinguish Proxylity delivery failures from Lambda execution errors.
+The destination role must grant `logs:CreateLogStream` and `logs:PutLogEvents` on the log group. This is strongly recommended for production deployments to distinguish Proxylity delivery failures from Lambda execution errors.
