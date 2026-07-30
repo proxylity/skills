@@ -40,7 +40,7 @@ Each destination requires an IAM role that Proxylity's `ServiceRole` can assume.
 
 ---
 
-## AWS Step Functions (Express)
+## AWS Step Functions
 
 **DestinationArn**: State machine ARN (`arn:aws:states:{region}:{account}:stateMachine:{name}`)
 
@@ -49,10 +49,12 @@ Each destination requires an IAM role that Proxylity's `ServiceRole` can assume.
 ```json
 {
   "Effect": "Allow",
-  "Action": ["states:StartSyncExecution"],
+  "Action": ["states:DescribeStateMachine", "states:StartSyncExecution"],
   "Resource": ["<state machine ARN>"]
 }
 ```
+
+Replace `states:StartSyncExecution` with `states:StartExecution` when targeting a STANDARD state machine.
 
 **Destination configuration:**
 
@@ -67,9 +69,10 @@ Each destination requires an IAM role that Proxylity's `ServiceRole` can assume.
 ```
 
 **Requirements:**
-- State machine type must be `EXPRESS` — Standard is not supported.
-- State machine returns `{ "Replies": [...] }` as output.
-- No Lambda cold-start overhead; ~50ms per execution overhead.
+- Both EXPRESS and STANDARD state machines are supported. Proxylity auto-detects the type via `states:DescribeStateMachine` — include that permission on the destination role.
+- EXPRESS state machines return `{ "Replies": [...] }` as output and support request/response.
+- STANDARD state machines are invoked asynchronously and cannot send replies.
+- No Lambda cold-start overhead; ~50ms per execution overhead for EXPRESS.
 
 **SAM resource example:**
 
@@ -94,8 +97,14 @@ Each destination requires an IAM role that Proxylity's `ServiceRole` can assume.
 
 ## Amazon EventBridge
 
-**DestinationArn**: Must be a **region-keyed JSON object**, not a plain ARN.
+**DestinationArn**: A plain ARN referencing a specific region's event bus, or a region-keyed JSON object for multi-region listeners.
 
+Plain ARN (single-region):
+```json
+"DestinationArn": "arn:aws:events:us-east-1:123456789012:event-bus/default"
+```
+
+Region-keyed map (multi-region):
 ```json
 "DestinationArn": {
   "us-east-1": "arn:aws:events:us-east-1:123456789012:event-bus/default",
@@ -151,7 +160,7 @@ Use `"*"` as a wildcard key for any unspecified region:
 ```json
 {
   "Effect": "Allow",
-  "Action": ["sqs:SendMessage"],
+  "Action": ["sqs:GetQueueUrl", "sqs:SendMessage"],
   "Resource": ["<queue ARN>"]
 }
 ```
@@ -169,23 +178,43 @@ One `RequestPacket` per SQS message body (JSON).
 ```json
 {
   "Effect": "Allow",
-  "Action": ["sqs:SendMessage"],
+  "Action": ["sqs:GetQueueUrl", "sqs:SendMessage"],
   "Resource": ["<queue ARN>"]
 }
 ```
 
-**FIFO requires a `PartitionKeyExpression`** to set the message group ID:
+**FIFO requires a `MessageGroupIdExpression`** (under `Arguments`) to set the message group ID:
 
 ```json
 {
   "DestinationArn": { "Fn::GetAtt": ["DeviceQueue", "Arn"] },
   "Role": { "Arn": "..." },
-  "PartitionKeyExpression": "[0:4]",
-  "PartitionKeyFormatter": "hex"
+  "Arguments": {
+    "MessageGroupIdExpression": "[0:4]",
+    "MessageGroupIdFormatter": "hex"
+  }
 }
 ```
 
 Messages with the same message group ID are delivered in order. See ARCHITECTURE.md for BREX syntax details.
+
+---
+
+## Amazon SNS
+
+**DestinationArn**: SNS topic ARN (`arn:aws:sns:{region}:{account}:{name}`)
+
+**IAM policy statement:**
+
+```json
+{
+  "Effect": "Allow",
+  "Action": ["sns:Publish"],
+  "Resource": ["<topic ARN>"]
+}
+```
+
+`sns:Publish` also grants access to `sns:PublishBatch`, which is used internally for efficient batch delivery. One `RequestPacket` per SNS message body (JSON). Both Standard and FIFO topics are supported.
 
 ---
 
@@ -209,13 +238,15 @@ Messages with the same message group ID are delivered in order. See ARCHITECTURE
 {
   "DestinationArn": { "Fn::GetAtt": ["DataStream", "Arn"] },
   "Role": { "Arn": "..." },
-  "PartitionKeyExpression": "[0:4]",
-  "PartitionKeyFormatter": "hex",
+  "Arguments": {
+    "PartitionKeyExpression": "[0:4]",
+    "PartitionKeyFormatter": "hex"
+  },
   "Batching": { "Count": 500, "TimeoutInSeconds": 1 }
 }
 ```
 
-Without `PartitionKeyExpression`, Proxylity uses a default partition key (random distribution across shards).
+Without `Arguments.PartitionKeyExpression`, Proxylity uses a random partition key (uniform distribution across shards).
 
 ---
 
@@ -228,7 +259,7 @@ Without `PartitionKeyExpression`, Proxylity uses a default partition key (random
 ```json
 {
   "Effect": "Allow",
-  "Action": ["firehose:PutRecordBatch"],
+  "Action": ["firehose:PutRecord"],
   "Resource": ["<delivery stream ARN>"]
 }
 ```
@@ -248,12 +279,12 @@ Packets are delivered as NDJSON (newline-delimited JSON), one `RequestPacket` pe
 ```json
 {
   "Effect": "Allow",
-  "Action": ["dynamodb:PutItem", "dynamodb:BatchWriteItem"],
+  "Action": ["dynamodb:DescribeTable", "dynamodb:BatchWriteItem"],
   "Resource": ["<table ARN>"]
 }
 ```
 
-One DynamoDB item per `RequestPacket`. The primary key is the `Remote.IpAddress:Remote.Port — Local.Domain:Local.Port` tuple; the sort key is `ReceivedAt`. All `RequestPacket` properties are mapped to item attributes.
+One DynamoDB item per `RequestPacket`. The primary key value is `"{remote_ip}:{remote_port} {local_ip}:{local_port}"` (space-separated); the sort key is the packet arrival time in ISO 8601 format. The primary and sort key attribute names are discovered automatically via `dynamodb:DescribeTable` and may be any names you choose. All `RequestPacket` properties are mapped to item attributes.
 
 ---
 

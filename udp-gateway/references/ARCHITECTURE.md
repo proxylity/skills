@@ -2,11 +2,16 @@
 
 ## Multi-Region Deployment
 
-A single `Custom::ProxylityUdpGatewayListener` creates a globally anycast endpoint. Proxylity's infrastructure automatically routes each incoming UDP packet to the nearest healthy AWS region. To add regional processing capacity, deploy `Custom::ProxylityUdpGatewayDestinationArn` resources in each target region.
+A single `Custom::ProxylityUdpGatewayListener` creates a globally anycast endpoint. Proxylity's infrastructure automatically routes each incoming UDP packet to the nearest healthy AWS region.
 
-### Global stack (deploy once, any region)
+The `Listener` and `Destination` resources belong in the global stack. How `DestinationArn` is provided depends on when the ARNs are known:
 
-Defines the listener plus a composite destination that maps regions to their specific ARNs:
+- **ARNs known ahead of time** — include a region-keyed `DestinationArn` map directly on the `Destination` in the global template. This is useful when targeting existing resources (S3 buckets, pre-deployed queues, etc.).
+- **ARNs not yet known** — omit `DestinationArn` from the global `Destination` and deploy `Custom::ProxylityUdpGatewayDestinationArn` in each regional stack. Each regional resource registers its ARN automatically when the regional stack is deployed. This is the common pattern when the global stack must be deployed first to establish shared resources (IAM roles, DynamoDB tables, etc.) that regional stacks depend on.
+
+### Global stack — with known ARNs (deploy once, any region)
+
+Include `DestinationArn` as a region-keyed map when the target ARNs are already known:
 
 ```json
 "UdpListener": {
@@ -29,11 +34,31 @@ Defines the listener plus a composite destination that maps regions to their spe
 }
 ```
 
-The region-keyed map tells Proxylity which ARN to invoke in each region. Use `"*"` as a fallback key for any region not explicitly listed.
+Use `"*"` as a fallback key for any region not explicitly listed.
+
+### Global stack — without ARNs (deploy before regional stacks)
+
+Omit `DestinationArn` when regional ARNs aren't yet known. Regional stacks will register their ARNs after deployment:
+
+```json
+"UdpListener": {
+  "Type": "Custom::ProxylityUdpGatewayListener",
+  "Properties": {
+    "ServiceToken": { "Fn::FindInMap": ["ProxylityConfig", {"Ref": "AWS::Region"}, "ServiceToken"] },
+    "ApiKey":       { "Fn::FindInMap": ["ProxylityConfig", "Account", "ApiKey"] },
+    "Protocols": ["udp"],
+    "ClientRestrictions": { "Networks": [{ "Ref": "ClientCidrToAllow" }] },
+    "Destinations": [{
+      "Role": { "Arn": { "Fn::GetAtt": ["DestinationRole", "Arn"] } },
+      "Batching": { "Count": 1000, "TimeoutInSeconds": 1 }
+    }]
+  }
+}
+```
 
 ### Regional stack (deploy per target region)
 
-Deploys the Lambda function and registers its ARN with the global listener:
+Deploys regional resources and registers the ARN with the global listener via `DestinationIndex` (zero-based index into the `Destinations` array):
 
 ```json
 "RegionalDestination": {
@@ -49,6 +74,10 @@ Deploys the Lambda function and registers its ARN with the global listener:
 }
 ```
 
+### Mixing models (advanced)
+
+A single listener can have destinations using both approaches — for example, one `Destination` with a `DestinationArn` targeting a pre-existing archive bucket (known ahead of time) and another `Destination` without `DestinationArn` that is populated by regional Lambda ARNs via regional stacks. Each `Custom::ProxylityUdpGatewayDestinationArn` targets the correct destination by its `DestinationIndex`.
+
 See `coap-demo/`, `dns-filter/`, and `radius/` in the examples repository for complete global + regional stack implementations.
 
 ### DynamoDB Global Tables for shared state
@@ -59,7 +88,7 @@ When regional functions need shared state, use DynamoDB Global Tables. Deploy th
 
 ## BREX — Binary Range Expressions
 
-BREX (Binary Range Expressions) extracts values from raw packet bytes without custom Lambda code. Used for `PartitionKeyExpression` on SQS FIFO and Kinesis destinations.
+BREX (Binary Range Expressions) extracts values from raw packet bytes without custom Lambda code. Used for `Arguments.MessageGroupIdExpression` on SQS FIFO destinations and `Arguments.PartitionKeyExpression` on Kinesis destinations.
 
 ### Syntax
 
@@ -74,9 +103,9 @@ Examples:
 - `[4:8]` — bytes 4–7
 - `[2:6]` — bytes 2–5
 
-### PartitionKeyFormatter
+### Key Formatters
 
-Applied after extraction to convert bytes to a string:
+Applied after extraction to convert bytes to a string. Set via `Arguments.MessageGroupIdFormatter` (SQS FIFO) or `Arguments.PartitionKeyFormatter` (Kinesis):
 
 | Value | Description |
 |---|---|
@@ -92,8 +121,10 @@ Extract the first 4 bytes of each packet as the device ID, convert to hex, use a
 "Destinations": [{
   "DestinationArn": { "Fn::GetAtt": ["DeviceQueue", "Arn"] },
   "Role": { "Arn": { "Fn::GetAtt": ["DestinationRole", "Arn"] } },
-  "PartitionKeyExpression": "[0:4]",
-  "PartitionKeyFormatter": "hex"
+  "Arguments": {
+    "MessageGroupIdExpression": "[0:4]",
+    "MessageGroupIdFormatter": "hex"
+  }
 }]
 ```
 

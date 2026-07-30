@@ -131,7 +131,7 @@ All examples are in the [proxylity/examples](https://github.com/proxylity/exampl
 
 **What it demonstrates:**
 - SQS FIFO queue destination
-- BREX `PartitionKeyExpression` extracting bytes from the packet payload
+- BREX `MessageGroupIdExpression` (under `Arguments`) extracting bytes from the packet payload
 - Multiple destinations on a single listener (standard queue + FIFO queue)
 - No custom Lambda code — pure routing configuration
 - MAVLink v1/v2 protocol detection via payload byte offsets

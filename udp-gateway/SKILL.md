@@ -233,8 +233,8 @@ Replace the domain and port with the values from the `Endpoint` stack output. Ch
 2. **Never hardcode `ServiceToken`, `ServiceRole`, or `ApiKey`.** Always use `Fn::FindInMap` against the `ProxylityConfig` mapping.
 3. **`DestinationRole` must trust Proxylity's `ServiceRole`** (from the mapping), not a hardcoded ARN.
 4. **`CAPABILITY_IAM`** is always required for CloudFormation deployment — every template creates IAM roles.
-5. **Step Functions: Express only** — set `"Type": "EXPRESS"`. Standard workflows are unsupported.
-6. **EventBridge `DestinationArn`** must be a region-keyed JSON object (`{ "*": "arn:..." }` or `{ "us-east-1": "arn:..." }`), not a plain ARN string.
+5. **Step Functions: both EXPRESS and STANDARD are supported.** Set `"Type": "EXPRESS"` for request/response (replies supported); `"Type": "STANDARD"` for async workflows (no replies). The destination role must include `states:DescribeStateMachine` — Proxylity uses it to auto-detect the state machine type.
+6. **EventBridge `DestinationArn`** may be a plain ARN string (`"arn:aws:events:us-east-1:..."`) or a region-keyed JSON object (`{ "*": "arn:..." }` or `{ "us-east-1": "arn:..." }`). Use a region-keyed map when the listener serves multiple regions.
 7. **WireGuard listeners** need either a `Peers` list with at least one public key, or `"AllowUnknownPeers": true`.
 8. **IAM least-privilege** — each `DestinationRole` grants only the action(s) needed for that specific destination (e.g., `lambda:InvokeFunction`, `kinesis:PutRecords`).
 
@@ -247,7 +247,7 @@ Replace the domain and port with the values from the `Endpoint` stack output. Ch
 - **Lambda cold start timeouts**: Use Step Functions Express (zero cold start) for latency-sensitive protocols (CoAP, RADIUS). Use .NET NativeAOT for ~100ms Lambda cold starts.
 - **High latency despite low batch timeout**: Lambda minimum invocation overhead is ~1ms per invocation after warm-up; Step Functions Express adds ~50ms overhead per execution.
 - **No reply back to client**: Lambda/SFn must explicitly return `{ "Replies": [...] }`. For server-initiated messages (CoAP Observe, push), use an `SNS PacketSource` — see [references/ARCHITECTURE.md](references/ARCHITECTURE.md).
-- **FIFO queue ordering**: Requires `PartitionKeyExpression` (BREX syntax) to extract partition keys from packet bytes (e.g., device ID from the first N bytes). See [references/ARCHITECTURE.md](references/ARCHITECTURE.md).
+- **FIFO queue ordering**: Requires `Arguments.MessageGroupIdExpression` (BREX syntax) to extract the message group ID from packet bytes (e.g., device ID from the first N bytes). See [references/ARCHITECTURE.md](references/ARCHITECTURE.md).
 - **Formatter is per-destination**: The same listener can route to one destination with `"Formatter": "coap"` and another with `"Formatter": "base64"`.
 - **Multi-region gotcha**: A single `Custom::ProxylityUdpGatewayListener` is globally anycast. Adding regional processing requires `Custom::ProxylityUdpGatewayDestinationArn` resources deployed per region. See [references/ARCHITECTURE.md](references/ARCHITECTURE.md).
 - **SAM Transform required** (`"Transform": "AWS::Serverless-2016-10-31"`) for `AWS::Serverless::Function`, `AWS::Serverless::StateMachine`, `Fn::ForEach`, and other SAM macros.
