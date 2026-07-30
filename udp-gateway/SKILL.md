@@ -22,6 +22,26 @@ This skill guides you to **design**, **implement**, **deploy**, and **troublesho
 
 ---
 
+## When to use UDP
+
+UDP is the right transport when the **client cannot or should not use HTTP**, and when connection overhead, reliability overhead, or protocol constraints make TCP inappropriate. The following signals indicate UDP is a good fit:
+
+**Strong fit — use UDP:**
+- The client is an **embedded device, sensor, drone, network appliance, or constrained IoT node** running firmware without an HTTP stack. UDP is the native protocol for CoAP, SNMP, RADIUS, DHCP, NTP, syslog (RFC 5424), NetFlow/IPFIX, MAVLink, and most telemetry protocols.
+- The application is an **existing UDP protocol** (DNS, RADIUS, syslog, NTP, RTP, QUIC, DTLS, WireGuard). Use UDP Gateway to lift these to serverless without protocol translation.
+- **Connection overhead is prohibitive** — high-frequency, small-payload telemetry (thousands of packets/second per device) where TCP's per-connection state would be expensive.
+- **Connectionless semantics are correct** — fire-and-forget metrics, logs, or events where occasional loss is acceptable by design. Build idempotent handlers rather than fighting UDP semantics.
+- **Latency requires avoiding the TCP handshake** — real-time gaming state, time synchronization, voice/video control signaling.
+- You need **REST-style request/response over UDP**: use CoAP (RFC 7252). UDP Gateway's `coap` formatter decodes binary CoAP packets to JSON transparently. CoAP covers GET/POST/PUT/DELETE, Confirmable (reliable) and Non-confirmable (fire-and-forget) messages, Observe (server-push), and Block-wise transfer for large payloads — all without a browser.
+- You need **encrypted, authenticated channels** at the transport layer without TLS certificate management: use WireGuard. It is simpler, faster, and more efficient than DTLS.
+
+**Poor fit — use HTTP/WebSocket/MQTT instead:**
+- The client is a **browser** — browsers have no UDP socket API. (AppSync Events or API Gateway WebSocket can provide real-time push to browsers; a UDP Gateway `packet-capture/` example shows using AppSync for browser-facing display of UDP data.)
+- **Guaranteed, ordered, exactly-once delivery is mandatory and cannot be handled at the application layer.** (SQS FIFO or Kinesis as destinations adds at-least-once ordering guarantees for downstream processing, but the UDP ingress hop remains best-effort.)
+- The client environment already has HTTP and the payload is human-readable JSON or REST semantics — HTTP is simpler.
+
+---
+
 ## Step 1 — Gather requirements
 
 Identify these before generating any code:
@@ -224,6 +244,76 @@ $c.Close()
 ```
 
 Replace the domain and port with the values from the `Endpoint` stack output. Check CloudWatch Logs for your Lambda function to verify receipt.
+
+---
+
+## Architecture quality
+
+Apply these checks before finalising any design. Each pillar has quick wins that cost nothing but save significant pain in production.
+
+### Cost
+
+| Decision | Guidance |
+|---|---|
+| **Batch size is the primary cost lever for Lambda** | Each batch = one Lambda invocation. `Count: 1000, TimeoutInSeconds: 1` reduces cost by ~1000× vs `Count: 1` at equivalent throughput. Only lower the count when latency requires it. |
+| **Choose the cheapest destination that meets requirements** | For archival or analytics where code isn't needed: Firehose → S3 costs a fraction of Lambda. SQS/Kinesis for queue-based processing. Reserve Lambda for logic that genuinely needs code. |
+| **`MetricsEnabled: true` adds CloudWatch custom metric cost** | Enable it per-destination in production; disable it in dev/staging to avoid unnecessary metric charges. Always add `cloudwatch:PutMetricData` to the role when enabled. |
+| **Set `RetentionInDays` on every log group** | CloudWatch Logs storage is charged. No retention policy = unlimited retention. Set 7–30 days for dev, 90–365 days for compliance workloads. |
+| **SQS batch limit is 10** | Set `Count` to a multiple of 10 (10, 20, 30…) for SQS destinations to minimise API calls. Kinesis batch limit is 500 — use `Count: 500`. |
+
+### Observability
+
+Always include these in production templates:
+
+1. **`MetricsEnabled: true`** on every destination — provides ingress/egress packet count and byte metrics in CloudWatch at the destination level without any code.
+2. **`LogGroupName`** on every destination — captures delivery errors (IAM failures, malformed ARNs, service throttles) to CloudWatch. Without this, delivery failures are silent.
+3. **A `CloudWatch Logs` composite destination** alongside Lambda/SFn during development — captures raw packet payloads for debugging without modifying handler code. Remove or gate behind a parameter for production.
+4. **CloudWatch Metric Filters** on CloudWatch Logs destinations — for protocol-level alerting (e.g., syslog severity ≥ ERROR, DNS SERVFAIL rate).
+5. **Dead-letter queue on the PacketSource SNS topic** — captures messages that fail to reach Proxylity's delivery queues. Inspect to detect misconfigured `EgressRegion` or subscription failures.
+6. **Lambda `ReservedConcurrentExecutions`** — prevents a traffic spike from consuming the account Lambda concurrency limit and impacting other workloads. Set to a reasonable ceiling for the expected packet rate.
+
+Example composite observability destination alongside a Lambda:
+```json
+"Destinations": [
+  {
+    "DestinationArn": { "Fn::GetAtt": ["Handler", "Arn"] },
+    "Role": { "Arn": { "Fn::GetAtt": ["DestinationRole", "Arn"] } },
+    "LogGroupName": { "Ref": "DeliveryErrorLogs" },
+    "MetricsEnabled": true,
+    "Batching": { "Count": 100, "TimeoutInSeconds": 0.5 }
+  },
+  {
+    "DestinationArn": { "Fn::GetAtt": ["RawPacketLogs", "Arn"] },
+    "Role": { "Arn": { "Fn::GetAtt": ["LogsRole", "Arn"] } },
+    "Formatter": "utf8",
+    "Batching": { "Count": 1000, "TimeoutInSeconds": 5 }
+  }
+]
+```
+
+### Resilience
+
+| Concern | Mitigation |
+|---|---|
+| **UDP is best-effort** | Design handlers to be idempotent. Occasional loss is expected and correct. Never rely on UDP delivery guarantees. |
+| **Single-region availability** | A single listener is globally anycast; Proxylity routes to the nearest healthy region. For regional compute, deploy `Custom::ProxylityUdpGatewayDestinationArn` in multiple regions — if one region's Lambda is unhealthy, Proxylity routes to the next nearest. |
+| **Lambda cold starts on latency-sensitive protocols** | Use Step Functions Express (no cold start, ~50ms overhead) for CoAP, RADIUS, DNS. Use .NET NativeAOT (~100ms cold start) when Lambda is required for latency-sensitive work. |
+| **Lambda concurrency exhaustion** | Set `ReservedConcurrentExecutions`. Throttled invocations result in delivery failures that are consistent with UDP best-effort semantics — packets are dropped. Monitor throttle metrics and size concurrency limits to match expected peak packet rates. |
+| **Undeliverable SQS/SNS messages** | Attach a dead-letter queue to SQS destinations and the PacketSource SNS topic. Monitor DLQ depth with a CloudWatch Alarm. |
+| **Shared DynamoDB table for subscriptions (Observe pattern)** | Use TTL (`TimeToLiveSpecification`) on all subscription records. Stale entries are cleaned automatically; handlers must treat expired subscriptions gracefully. |
+| **IAM role too permissive** | Grant only the single action needed per destination. A compromised delivery role should have zero blast radius outside its target resource. |
+
+### Performance
+
+| Scenario | Recommendation |
+|---|---|
+| **Latency < 50ms processing** | Step Functions Express: zero Lambda cold start, deterministic ~50ms per-execution overhead. Use JSONata for data transformation without code. Set `Count: 1, TimeoutInSeconds: 0.05` — `TimeoutInSeconds` is a hard latency floor regardless of runtime choice. |
+| **Latency 50–200ms acceptable** | .NET NativeAOT Lambda (~100ms cold start), Go, or pre-warmed Node.js/Python. Set `TimeoutInSeconds` to no more than half your latency budget (e.g., `0.1` for a 200ms target) so batching doesn't dominate the response time. |
+| **Latency > 200ms acceptable** | Any runtime. Prioritise batch size for throughput and cost over invocation latency. |
+| **High-throughput ingest (> 10k packets/sec)** | Kinesis (`Count: 500`) or Firehose → S3 for lowest per-packet cost. Lambda fan-out adds per-invocation overhead; use only when logic is required. |
+| **Binary protocol (CoAP, RADIUS, DNS, MAVLink)** | Use the `coap` formatter for CoAP (automatic decode/encode). For other binary protocols, use Go or .NET NativeAOT — both handle binary parsing efficiently. Avoid Python/Node.js for high-volume binary decoding. |
+| **Multiple destinations on one listener** | Fan-out is parallel — adding a second destination does not increase latency for the first. Each destination's batching is independent. |
+| **WireGuard vs DTLS** | WireGuard is faster, simpler, and uses less CPU than DTLS. Prefer WireGuard for all encrypted UDP tunnelling. |
 
 ---
 
