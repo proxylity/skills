@@ -165,6 +165,8 @@ A minimal working template is in [assets/starter.template.json](assets/starter.t
 
 ## Step 4 — Write the packet handler
 
+Load [references/HANDLERS.md](references/HANDLERS.md) for working handler skeletons in Node.js, Python, Go, .NET, and Step Functions ASL before generating any handler code.
+
 **Lambda and Step Functions Express** receive a batch envelope:
 
 ```json
@@ -352,6 +354,7 @@ Load these on demand — only when the task requires the detail they contain:
 
 | File | Load when… |
 |---|---|
+| [references/HANDLERS.md](references/HANDLERS.md) | Writing any Lambda or Step Functions handler — contains working code for Node.js, Python, Go, .NET (typed SDK and raw JsonObject), Step Functions ASL, and WireGuard decapsulated handlers |
 | [references/ARCHITECTURE.md](references/ARCHITECTURE.md) | Multi-region stacks, BREX partition keys, composite destinations, WireGuard peers, PacketSource, batching tuning |
 | [references/PACKET-FORMAT.md](references/PACKET-FORMAT.md) | Full request/response JSON schemas, per-service format differences (SQS, EventBridge, DynamoDB, S3, Firehose) |
 | [references/DESTINATIONS.md](references/DESTINATIONS.md) | IAM policy statements, DestinationArn syntax, and configuration options per destination type |
