@@ -1,323 +1,224 @@
-# Handler Implementation Reference
+# Handler implementation
 
-Working handler skeletons extracted from [proxylity/examples](https://github.com/proxylity/examples). Use these as starting points, not the format description in the skill — the format description tells you *what* to produce, these tell you *how* to produce it in each runtime.
+The examples below state their formatter explicitly. Do not combine a base64-only handler with `Formatter: coap` or `utf8`. See the packet-format reference for other encodings.
 
----
+## Node.js: base64 echo
 
-## Node.js (inline CloudFormation — no SAM required)
+Inline CloudFormation `ZipFile` / SAM `InlineCode` uses CommonJS `index.handler`:
 
-The simplest deployment: the handler is embedded directly in the CloudFormation template as a `ZipFile` string. No build step, no SAM, no S3 artifact.
-
-**CloudFormation template fragment:**
-```json
-"Handler": {
-  "Type": "AWS::Lambda::Function",
-  "Properties": {
-    "Runtime": "nodejs22.x",
-    "Handler": "index.handler",
-    "Code": {
-      "ZipFile": {
-        "Fn::Join": ["\n", [
-          "exports.handler = async (inbound) => {",
-          "  const counts = inbound.Messages.reduce((acc, m) => {",
-          "    acc[m.Remote.IpAddress] = (acc[m.Remote.IpAddress] || 0) + 1;",
-          "    return acc;",
-          "  }, {});",
-          "  const replies = inbound.Messages.flatMap(m => {",
-          "    const count = counts[m.Remote.IpAddress];",
-          "    if (count == null) return [];",
-          "    counts[m.Remote.IpAddress] = null;",
-          "    return [{ Tag: m.Tag, Data: btoa(count + '\\n') }];",
-          "  });",
-          "  return { Replies: replies };",
-          "};"
-        ]]
-      }
-    },
-    "Role": { "Fn::GetAtt": ["HandlerRole", "Arn"] }
-  }
-}
-```
-
-**Standalone `index.mjs` (for `nodejs22.x` with ES modules):**
 ```javascript
-export const handler = async (inbound) => {
-  // inbound.Messages is the batch array; Data is base64 by default
-  const replies = inbound.Messages.map(m => {
-    const payload = Buffer.from(m.Data, 'base64');
-    // ... process payload ...
-    const response = Buffer.from('ok\n');
-    return { Tag: m.Tag, Data: response.toString('base64') };
-  });
-  return { Replies: replies };
+exports.handler = async (event) => {
+  if (!Array.isArray(event.Messages)) {
+    throw new TypeError("Expected UDP Gateway Messages array");
+  }
+  return {
+    Replies: event.Messages.map(message => ({
+      Tag: message.Tag,
+      Data: message.Data
+    }))
+  };
 };
 ```
 
-**Key points:**
-- `inbound.Messages[i].Tag` — opaque string; must be echoed in the reply to route the response back to the correct client.
-- `inbound.Messages[i].Data` — base64-encoded raw bytes when `Formatter` is `base64` (default). Use `Buffer.from(m.Data, 'base64')` to get bytes.
-- Return `{ Replies: [] }` (not `null`, not `{}`) when there is nothing to reply.
-- Fire-and-forget (no response needed): return `{ Replies: [] }` or omit the `Tag` from `Replies`.
+This echoes arbitrary bytes without decoding/re-encoding. To process bytes use `Buffer.from(message.Data, "base64")` and encode response bytes with `.toString("base64")`. Node's decoder is permissive; validate protocol structure and length rather than assuming decoding authenticates or validates a packet. Use `export const handler` only in a packaged ES-module project such as an `.mjs` file.
 
----
+For `utf8`, return text directly; do not base64-encode it. For no reply, omit that message from `Replies`, not its `Tag` from a reply object.
 
-## Python
+## Python: base64 processing
 
-Requires SAM CLI (`sam build && sam deploy`). Runtime: `python3.12` or `python3.11`.
+Python can be inline (`index.handler`) or packaged (`app.handler`); SAM is optional, not required by the language.
 
-**`src/app.py`:**
 ```python
 import base64
-from datetime import datetime, timezone
-from typing import Any
 
-def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    messages = event.get('Messages', [])
-
+def handler(event, context):
+    messages = event["Messages"]
+    if not isinstance(messages, list):
+        raise TypeError("Expected UDP Gateway Messages array")
     replies = []
-    for msg in messages:
-        raw = base64.b64decode(msg['Data'])          # bytes from client
-        # ... process raw ...
-        response = b'ok\n'
+    for message in messages:
+        payload = base64.b64decode(message["Data"], validate=True)
         replies.append({
-            'Tag': msg['Tag'],
-            'Data': base64.b64encode(response).decode(),
+            "Tag": message["Tag"],
+            "Data": base64.b64encode(payload).decode("ascii"),
         })
-
-    return {'Replies': replies}
+    return {"Replies": replies}
 ```
 
-**`template.yaml` Lambda resource fragment:**
-```yaml
-Handler:
-  Type: AWS::Serverless::Function
-  Properties:
-    CodeUri: src/
-    Handler: app.handler
-    Runtime: python3.12
-    Architectures: [x86_64]
-    Role: !GetAtt HandlerRole.Arn
-```
+This deliberately surfaces invalid base64. In a production handler, explicitly decide whether one malformed protocol message fails the invocation or is logged and excluded; do not silently discard it. Log tags and error categories rather than raw credentials/payloads.
 
-**Key points:**
-- `msg['Remote']['IpAddress']` and `msg['Remote']['Port']` — client source address.
-- `msg['Local']['Domain']` and `msg['Local']['Port']` — which listener endpoint received this packet.
-- `msg['ReceivedAt']` — ISO 8601 timestamp string.
-- `msg['Formatter']` — reflects the formatter configured on the destination (`base64`, `utf8`, `coap`, etc.).
-- When `Formatter` is `utf8` or `ascii`, `msg['Data']` is already a decoded string — do **not** call `base64.b64decode` on it. The reply `Data` must still be base64 regardless of the inbound formatter.
+## Go: base64 processing
 
----
+Use `github.com/aws/aws-lambda-go/lambda` with a supported Go toolchain and an OS-only Lambda runtime (`provided.al2023`). Keep dependency versions pinned by the project.
 
-## Go
-
-Requires SAM CLI and Go ≥ 1.23. Produces a compiled `bootstrap` binary (Amazon Linux 2023 runtime `provided.al2023`).
-
-**`src/main.go`:**
 ```go
 package main
 
 import (
     "context"
     "encoding/base64"
+    "fmt"
 
     "github.com/aws/aws-lambda-go/lambda"
 )
 
-type Remote struct {
-    IpAddress string `json:"IpAddress"`
-    Port      int    `json:"Port"`
-}
-
-type Local struct {
-    Domain string `json:"Domain"`
-    Port   int    `json:"Port"`
-}
-
 type Message struct {
-    Tag        string `json:"Tag"`
-    Remote     Remote `json:"Remote"`
-    Local      Local  `json:"Local"`
-    ReceivedAt string `json:"ReceivedAt"`
-    Formatter  string `json:"Formatter"`
-    Data       string `json:"Data"`
+    Tag  string `json:"Tag"`
+    Data string `json:"Data"`
 }
 
-type InboundPackets struct {
+type Request struct {
     Messages []Message `json:"Messages"`
 }
 
-type OutboundPacket struct {
+type Reply struct {
     Tag  string `json:"Tag"`
     Data string `json:"Data"`
 }
 
 type Response struct {
-    Replies []*OutboundPacket `json:"Replies"`
+    Replies []Reply `json:"Replies"`
 }
 
-func handler(ctx context.Context, inbound InboundPackets) (Response, error) {
-    var replies []*OutboundPacket
-    for _, msg := range inbound.Messages {
-        raw, _ := base64.StdEncoding.DecodeString(msg.Data) // raw bytes from client
-        _ = raw
-        // ... process raw ...
-        response := []byte("ok\n")
-        replies = append(replies, &OutboundPacket{
-            Tag:  msg.Tag,
-            Data: base64.StdEncoding.EncodeToString(response),
+func handler(ctx context.Context, request Request) (Response, error) {
+    if request.Messages == nil {
+        return Response{}, fmt.Errorf("expected Messages array")
+    }
+    replies := make([]Reply, 0, len(request.Messages))
+    for _, message := range request.Messages {
+        payload, err := base64.StdEncoding.DecodeString(message.Data)
+        if err != nil {
+            return Response{}, fmt.Errorf("packet %q: invalid base64: %w", message.Tag, err)
+        }
+        replies = append(replies, Reply{
+            Tag: message.Tag,
+            Data: base64.StdEncoding.EncodeToString(payload),
         })
     }
     return Response{Replies: replies}, nil
 }
 
-func main() {
-    lambda.Start(handler)
-}
+func main() { lambda.Start(handler) }
 ```
 
-**`src/Makefile` (SAM calls this via `build-<LogicalId>`):**
-```makefile
-build-Handler:
-	go mod tidy
-	go mod vendor
-	GOOS=linux GOARCH=amd64 go build -o bootstrap main.go
-	mkdir -p $(ARTIFACTS_DIR)
-	mv bootstrap $(ARTIFACTS_DIR)/bootstrap
-	chmod +x $(ARTIFACTS_DIR)/bootstrap
+An allocated empty slice serializes as `[]`, not `null`. Build a Linux `bootstrap` for the selected architecture. If using SAM's Makefile builder, declare `Metadata: { BuildMethod: makefile }` on the function and implement `build-<LogicalId>`; a Makefile alone does not select that builder. Otherwise use the repository's normal build/package workflow.
+
+## .NET SDK 2.x: typed async handler
+
+Current SDK/template source targets .NET 10 and templates reference `Proxylity.UdpGateway.LambdaSdk` 2.0.0. Verify package feed availability and project compatibility before selecting versions; older examples may still pin SDK 1.x.
+
+Recommended scaffolding:
+
+```bash
+dotnet new install Proxylity.Templates
+dotnet new proxylity-udp-async -n MyUdpService
+# Or NativeAOT:
+dotnet new proxylity-udp-async-aot -n MyUdpService
 ```
 
-**`template.yaml` Lambda resource fragment:**
-```yaml
-Handler:
-  Type: AWS::Serverless::Function
-  Properties:
-    CodeUri: src/
-    Handler: bootstrap
-    Runtime: provided.al2023
-    Architectures: [x86_64]
-    Role: !GetAtt HandlerRole.Arn
-```
+Inspect generated package versions before restoring/building. Reference `Amazon.Lambda.Core` explicitly in the handler project and align its version with the selected SDK; do not assume a project reference to SDK source supplies its private build dependencies. Do not assume installing a template package installs SAM, a Linux compiler, or the matching .NET SDK.
 
-**Key points:**
-- The `aws-lambda-go` library handles JSON marshalling automatically — just define your structs with `json:` tags and pass `handler` to `lambda.Start`.
-- Return `Response{Replies: nil}` (or an empty slice) to send no replies.
-- For fire-and-forget workloads (SQS/Kinesis destinations), the return value is ignored — return `Response{}, nil`.
+Handler and managed entry point:
 
----
-
-## .NET / C# — Typed SDK (recommended for new handlers)
-
-Uses the `Proxylity.UdpGateway.LambdaSdk` NuGet package, which provides typed request/response classes and handles per-message dispatch. Best for NativeAOT (cold start ~100ms).
-
-**`src/Function.cs`:**
 ```csharp
 using Amazon.Lambda.Core;
 using Proxylity.UdpGateway.LambdaSdk;
 
-[assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.DefaultLambdaJsonSerializer))]
+[assembly: LambdaSerializer(typeof(UdpGatewayLambdaJsonSerializer))]
 
-public class Function
+namespace MyUdpService;
+
+public sealed class Handler : IUdpGatewayHandlerAsync
 {
-    public async Task<ProxylityLambdaResponse> FunctionHandler(
-        ProxylityLambdaRequest request, ILambdaContext context)
+    public Task<UdpGatewayReply> HandleAsync(
+        UdpGatewayMessage message, ILambdaLogger logger)
     {
-        if (request.Messages is not { Length: > 0 })
-            return new ProxylityLambdaResponse { Replies = [] };
-
-        var replies = new List<ResponsePacket>();
-        foreach (var msg in request.Messages)
-        {
-            var raw = Convert.FromBase64String(msg.Data);  // bytes from client
-            // ... process raw ...
-            var response = "ok\n"u8.ToArray();
-            replies.Add(new ResponsePacket
-            {
-                Tag  = msg.Tag,
-                Data = Convert.ToBase64String(response),
-            });
-        }
-        return new ProxylityLambdaResponse { Replies = [.. replies] };
+        logger.LogLine($"Received packet with {message.Data.Length} bytes");
+        return Task.FromResult(message.Reply(message.Data));
     }
+}
+
+public static class Function
+{
+    private static readonly Handler Handler = new();
+
+    public static Task<UdpGatewayBatchResponse> FunctionHandler(
+        UdpGatewayBatchRequest request, ILambdaContext context) =>
+        UdpGatewayBatchProcessor.ProcessAsync(Handler, request, context);
 }
 ```
 
-**`template.yaml` Lambda resource fragment (NativeAOT):**
-```yaml
-Handler:
-  Type: AWS::Serverless::Function
-  Properties:
-    CodeUri: src/
-    Handler: Handler::Function_FunctionHandler_Generated  # generated by NativeAOT tooling
-    Runtime: provided.al2023
-    Architectures: [x86_64]
-    Role: !GetAtt HandlerRole.Arn
-```
+Use `message.NoReply()` when no response is needed. Synchronous handlers implement `IUdpGatewayHandler` and use `UdpGatewayBatchProcessor.Process`.
 
-**Key points:**
-- `ProxylityLambdaRequest.Messages` is `UdpGatewayMessage[]`. Each element has `Tag`, `Data` (base64), `Remote` (`IpAddress`, `Port`), `Local` (`Domain`, `Port`), `ReceivedAt`, `Formatter`.
-- `ProxylityLambdaResponse.Replies` is `ResponsePacket[]`. Only set `Tag` and `Data`; `GeneratedAt` is optional.
-- If no reply is needed, return `new ProxylityLambdaResponse { Replies = [] }`.
+Important SDK details:
 
----
+- `UdpGatewayBatchRequest.Messages` and response `Replies` are lists, not arrays.
+- `message.DataString` maps to wire JSON `Data`; `message.Data` is decoded `byte[]`. Do not base64-decode it again.
+- `message.Reply(bytes)` preserves the tag/formatter and supplies reply metadata. SDK 2.x's semantic reply methods replace older raw-byte handler returns.
+- The SDK byte decoder supports `base64`, `hex`, `utf8`, `ascii`, **not `coap`**. For CoAP use a raw JSON handler and the formatter's structured contract.
+- Use **`UdpGatewayLambdaJsonSerializer`**, not the default AWS serializer, for the SDK models. It includes source-generated serialization and handles empty base64 payloads.
+- `ProcessAsync` runs per-message handlers in parallel and converts per-message exceptions to no-reply results. Do not assume that throwing inside a handler fails the whole Lambda batch. Explicitly log/measure failures; if batch failure is required, implement that policy instead of relying on this helper.
+- Do not assume SDK models retain every wire metadata field. Use a raw event model when you need fields such as `Inner` or ingress routing context that the typed model does not expose.
 
-## .NET / C# — Raw `JsonObject` (no SDK dependency)
+### NativeAOT bootstrap
 
-Use when you want no extra NuGet dependency or prefer to work with the raw JSON directly. Pattern from `dns-filter`.
+The AOT template supplies an executable, `PublishAot`, runtime support dependencies, and `provided.al2023` / `bootstrap`. Its bootstrap is:
 
-**`src/Function.cs`:**
 ```csharp
-using Amazon.Lambda.Core;
-using System.Text.Json.Nodes;
+using Amazon.Lambda.RuntimeSupport;
+using Proxylity.UdpGateway.LambdaSdk;
 
-[assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.DefaultLambdaJsonSerializer))]
+namespace MyUdpService;
 
-public class Function
+public static class Program
 {
-    public async Task<JsonObject> FunctionHandler(JsonObject input, ILambdaContext context)
+    public static async Task Main()
     {
-        var packets = input["Messages"]?.AsArray()
-            ?? throw new InvalidOperationException("Missing Messages — is this from UDP Gateway?");
-
-        var replyTasks = packets.Select(async p =>
-        {
-            var tag  = p!["Tag"]!.ToString();
-            var data = Convert.FromBase64String(p["Data"]!.ToString()); // raw bytes
-            // ... process data ...
-            var response = "ok\n"u8.ToArray();
-            return (JsonNode)new JsonObject
-            {
-                ["Tag"]  = tag,
-                ["Data"] = Convert.ToBase64String(response),
-            };
-        });
-
-        var replies = await Task.WhenAll(replyTasks);
-        return new JsonObject { ["Replies"] = new JsonArray(replies) };
+        await LambdaBootstrapBuilder
+            .Create<UdpGatewayBatchRequest, UdpGatewayBatchResponse>(
+                Function.FunctionHandler, new UdpGatewayLambdaJsonSerializer())
+            .Build()
+            .RunAsync();
     }
 }
 ```
 
-**Key points:**
-- No `Proxylity.UdpGateway.LambdaSdk` dependency — only the standard AWS Lambda serializer.
-- Suitable for fire-and-forget destinations (SQS, EventBridge, DynamoDB) where Proxylity ignores the return value anyway; simplifies the function to a plain `Task` return.
-- For parallel per-packet processing: use `Task.WhenAll` as shown; for sequential processing use a simple `foreach`.
+Build in a compatible Linux environment for the Lambda architecture. Do not invent an annotations-generated handler name or use reflection-based serializers as an AOT shortcut.
 
----
+### Raw JSON alternative
 
-## Step Functions Express — no handler code
+For managed .NET, a `JsonObject` handler with the standard AWS System.Text.Json serializer can implement the wire contract directly. This is a different serialization path from the SDK. For NativeAOT, explicitly configure source-generated serialization for your actual models/runtime bootstrap; do not label an arbitrary reflection-based `JsonObject` example as AOT-ready.
 
-Step Functions Express workflows receive the same batch envelope as Lambda but there is no handler function to write. The state machine ASL replaces the handler. Proxylity invokes the state machine synchronously (Express) and reads `Replies` from the execution output.
+## WireGuard: raw inner IP packet handler
 
-**Minimal ASL that echoes each packet:**
+Use `proxylity-wg-async` or `proxylity-wg-async-aot` for the SDK's `DecapsulatedHandler` path. That base class parses **complete inner IP packets**, dispatches UDP/TCP/ICMPv4/ICMPv6, and returns complete response IP packet bytes. Wire it through `UdpGatewayBatchProcessor.ProcessAsync`, not a nonexistent `HandleBatchAsync`.
+
+The key override signature is:
+
+```csharp
+public override Task<byte[]?> HandleAsync(
+    PacketDotNet.UdpPacket packet,
+    RemoteEndpoint remote,
+    ILambdaLogger logger)
+```
+
+Copy the full packet-construction pattern from the current tunnel template: reverse source/destination IPs and ports, attach the transport payload, update transport/IP checksums, and return the parent IP packet's bytes. Return `null` for no reply. A bare UDP payload is not a complete IP reply.
+
+Do **not** set `DecapsulatedDelivery: true` for this raw-IP parsing path. That listener setting instead exposes application payloads with `Inner` addressing metadata and calls for the matching application-level handler/reply contract.
+
+## Step Functions Express: valid JSONata echo
+
+This complete ASL definition works with a base64 destination and preserves the array shape for zero, one, or many messages:
+
 ```json
 {
-  "Comment": "Echo each packet back to the sender",
+  "QueryLanguage": "JSONata",
   "StartAt": "BuildReplies",
   "States": {
     "BuildReplies": {
       "Type": "Pass",
-      "Parameters": {
-        "Replies.$": "$.Messages[*].{ Tag: Tag, Data: Data }"
+      "Output": {
+        "Replies": "{% [$states.input.Messages.{\"Tag\": Tag, \"Data\": Data}] %}"
       },
       "End": true
     }
@@ -325,61 +226,16 @@ Step Functions Express workflows receive the same batch envelope as Lambda but t
 }
 ```
 
-**Key points:**
-- The input to the execution is the same `{ "Messages": [...] }` batch envelope.
-- The output must be `{ "Replies": [...] }` — same contract as Lambda.
-- Use `"Type": "EXPRESS"` on the state machine resource; STANDARD workflows are async and cannot return replies.
-- Zero Lambda cold start; ~50ms per-execution overhead from Step Functions itself.
-- For data transformation without code, use JSONata states (`"QueryLanguage": "JSONata"`).
+Use `$states.input`, not `States.input`. Do not put JavaScript/object-projection syntax in a JSONPath `Parameters` expression. JSONata states use `Output`/`Arguments`/`Assign` as applicable, not JSONPath-only fields.
 
----
+For an Express SAM state machine set `Type: EXPRESS`, its execution role, definition, and appropriate logging policy. The Proxylity destination role separately needs `states:DescribeStateMachine` and `states:StartSyncExecution`.
 
-## WireGuard / Decapsulated handler (.NET SDK)
+Validate ASL with `aws stepfunctions validate-state-machine-definition --definition file://state-machine.asl.json --type EXPRESS` when AWS access is available. Measure actual execution latency; Express avoids Lambda initialization but does not guarantee fixed response times.
 
-When `DecapsulatedDelivery: true` is set on the WireGuard listener, Proxylity strips the WireGuard envelope and delivers raw inner UDP packets. Use `DecapsulatedHandler` from the SDK.
+## Lambda response streaming
 
-```csharp
-using PacketDotNet;
-using Proxylity.UdpGateway.LambdaSdk;
+Set `Arguments.UseResponseStreaming: true` and use an AWS-supported response-streaming implementation. A normal buffered handler does not become streaming because the destination flag is set.
 
-public class MyHandler : DecapsulatedHandler
-{
-    // Called once per inner UDP payload; return response bytes or null for no reply
-    public override async Task<byte[]?> HandleAsync(
-        byte[] payload, RemoteEndpoint remote, ILambdaLogger logger)
-    {
-        // payload is the decrypted inner UDP payload (not the WireGuard envelope)
-        logger.LogLine($"Received {payload.Length} bytes from {remote.IpAddress}:{remote.Port}");
-        return await Task.FromResult<byte[]?>(null); // no reply
-    }
+The response contract is still a JSON object containing a `Replies` array. Emit reply objects incrementally within that array, preserve each `Tag`, use the destination formatter, and finish valid JSON. Do not substitute SSE, NDJSON, HTTP metadata framing, or raw UDP bytes unless the deployed adapter explicitly supports it. Test a first reply before function completion and additional replies, not just a final buffered response.
 
-    // Override per packet-type methods (IcmpV4Packet, UdpPacket, etc.) for typed dispatch
-    public override async Task<byte[]?> HandleAsync(
-        IcmpV4Packet packet, RemoteEndpoint remote, ILambdaLogger logger)
-    {
-        // Respond to ICMP echo requests (ping)
-        var pong = new IcmpV4Packet(...) { TypeCode = IcmpV4TypeCode.EchoReply };
-        return await Task.FromResult(pong.Bytes);
-    }
-}
-```
-
-**Key points:**
-- `DecapsulatedHandler` dispatches by inner packet type; override only the types you care about.
-- The outer Lambda function class wires this up via `new MyHandler().HandleBatchAsync(request, context)`.
-- Responses are automatically re-encapsulated in WireGuard before delivery to the client.
-- Requires `DecapsulatedDelivery: true` on the destination in the CloudFormation template.
-
----
-
-## Common mistakes to avoid in generated handler code
-
-| Mistake | Correct pattern |
-|---|---|
-| Returning `null` instead of `{ Replies: [] }` from Node.js | Always return `{ Replies: [] }` for no-reply |
-| Forgetting `[assembly: LambdaSerializer(...)]` in C# | Required on every Lambda entry-point assembly |
-| Calling `base64.b64decode` on `Data` when `Formatter` is `utf8` | Only decode base64 when `Formatter` is `base64` (the default) |
-| Hardcoding `Tag` values in replies | Always echo `msg.Tag` from the inbound message |
-| Returning replies for packets that should be fire-and-forget | Omit the `Tag` from `Replies` or return `Replies: []` |
-| Using `STANDARD` Step Functions for request/response | Must use `EXPRESS`; STANDARD cannot return replies |
-| Using `int` for `Port` in Go structs without a json tag | All struct fields need `json:"..."` tags matching the wire format |
+Use a runtime-supported streaming API (for example Node's `awslambda.streamifyResponse` in Lambda). Ordinary .NET SDK batch-return handlers above are buffered and do not implement streaming. Keep `UseAsyncInvoke` false and grant `lambda:InvokeFunction`. Account for function timeout, client reachability/session lifetime, backpressure, and AWS streaming charges/quotas.

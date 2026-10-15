@@ -1,401 +1,154 @@
-# Destination Reference — Proxylity UDP Gateway
+# Destinations and IAM
 
-Each destination requires an IAM role that Proxylity's `ServiceRole` can assume. The role must grant the minimum permissions for that specific destination.
+All examples below are destination fragments, not complete templates. Each destination needs a Proxylity-assumable role with `Role.Arn`. Use the customer mapping's `ServiceRole` as trust principal. Resource ARNs below use the commercial AWS partition; use the actual supported partition/region when adapting.
 
----
+## Delivery permissions and payloads
 
-## AWS Lambda
+| Destination | ARN resource form | Delivery IAM actions | Delivered content |
+|---|---|---|---|
+| Lambda | `arn:aws:lambda:REGION:ACCOUNT:function:NAME[:QUALIFIER]` | `lambda:InvokeFunction` | `{"Messages":[...]}` |
+| Step Functions Express | `arn:aws:states:REGION:ACCOUNT:stateMachine:NAME` | `states:DescribeStateMachine`, `states:StartSyncExecution` | Batch envelope; synchronous `Replies` output |
+| Step Functions Standard | Same | `states:DescribeStateMachine`, `states:StartExecution` | Batch envelope; no synchronous replies |
+| API Gateway | `arn:aws:execute-api:REGION:ACCOUNT:API/STAGE/POST/PATH` | `execute-api:Invoke` | Batch envelope; map HTTP response to `Replies` |
+| EventBridge | `arn:aws:events:REGION:ACCOUNT:event-bus/NAME` | `events:PutEvents` | One packet per event `detail` |
+| SQS | `arn:aws:sqs:REGION:ACCOUNT:NAME[.fifo]` | `sqs:GetQueueUrl`, `sqs:SendMessage` | One packet JSON per message by default |
+| SNS | `arn:aws:sns:REGION:ACCOUNT:NAME` | `sns:Publish` | One packet JSON per message |
+| Kinesis Data Streams | `arn:aws:kinesis:REGION:ACCOUNT:stream/NAME` | `kinesis:PutRecords` | Encoded packet records |
+| Data Firehose | `arn:aws:firehose:REGION:ACCOUNT:deliverystream/NAME` | `firehose:PutRecord` | NDJSON batch |
+| DynamoDB | `arn:aws:dynamodb:REGION:ACCOUNT:table/NAME` | `dynamodb:DescribeTable`, `dynamodb:BatchWriteItem` | Packet properties mapped to an item |
+| S3 | `arn:aws:s3:::BUCKET` | `s3:PutObject` on `arn:aws:s3:::BUCKET/*` | NDJSON objects |
+| CloudWatch Logs | `arn:aws:logs:REGION:ACCOUNT:log-group:NAME` | `logs:CreateLogStream`, `logs:PutLogEvents` on log streams | UTF-8 packet text, one log event per packet |
+| AWS IoT Data | `arn:aws:iot:REGION:ACCOUNT:topic/PATH` | `iot:Publish` | Packet JSON, or binary payload in dynamic mode |
+| Location tracker | `arn:aws:geo:REGION:ACCOUNT:tracker/NAME` | `geo:BatchUpdateDevicePosition` | Device position updates extracted with BREX |
 
-**DestinationArn**: Lambda function ARN (`arn:aws:lambda:{region}:{account}:function:{name}`)
+Scope delivery permissions to the specific target, including aliases/qualifiers and API stage/method/path. SQS/SNS batch APIs use their respective `SendMessage`/`Publish` IAM actions. Do not infer unsupported SNS FIFO group configuration from SQS-specific arguments.
 
-**IAM policy statement:**
+Destination roles may additionally need:
+
+- `logs:CreateLogStream` and `logs:PutLogEvents` on configured delivery-error log streams.
+- `cloudwatch:PutMetricData` on `"*"` when `MetricsEnabled` is true; restrict with `cloudwatch:namespace = Proxylity/UDP Gateway`.
+- Appropriate KMS key permissions and key policies for the actual encrypted service. These are service-specific, not a universal wildcard KMS policy.
+
+## Common destination options
 
 ```json
 {
-  "Effect": "Allow",
-  "Action": ["lambda:InvokeFunction"],
-  "Resource": ["<function ARN>"]
-}
-```
-
-**Destination configuration:**
-
-```json
-{
-  "DestinationArn": { "Fn::GetAtt": ["MyFunction", "Arn"] },
-  "Role": { "Arn": { "Fn::GetAtt": ["DestinationRole", "Arn"] } },
-  "Batching": { "Count": 1000, "TimeoutInSeconds": 1 },
+  "DestinationArn": "arn:aws:lambda:us-east-1:123456789012:function:handler",
+  "Role": { "Arn": "arn:aws:iam::123456789012:role/GatewayDelivery" },
   "Formatter": "base64",
-  "MetricsEnabled": true
+  "Batching": { "Count": 10, "TimeoutInSeconds": 0.05 },
+  "MetricsEnabled": true,
+  "LogGroupName": "/proxylity/delivery-errors"
 }
 ```
 
-**Formatter options**: `base64` (default), `utf8`, `ascii`, `hex`, `coap`
+`Formatter` is per destination: `base64`, `hex`, `utf8`, `ascii`, or `coap`. `FilterExpression` is also per destination and is evaluated before delivery. See architecture for BREX, regional ARN maps, batching, and metric semantics.
 
-**Runtime recommendations:**
-- Node.js 22.x — simplest for inline code
-- Python 3.12 — concise, best ecosystem for data processing
-- Go 1.x — highest throughput, requires SAM CLI to compile
-- .NET NativeAOT — ~100ms cold start, requires SAM CLI; best for latency-sensitive protocols
+## Lambda: sync, async, streaming, tenants
 
----
+All options belong under `Arguments`:
 
-## AWS Step Functions
+| Argument | Meaning |
+|---|---|
+| `UseAsyncInvoke: true` | Lambda `Event` invocation; output ignored; AWS async retry/destination policies apply |
+| `UseResponseStreaming: true` | Invoke with response stream; requires a streaming implementation |
+| `TenantId` | Static tenant ID for a Lambda function configured for tenant isolation |
+| `TenantIdExpression` | BREX-derived tenant ID |
+| `TenantIdFormatter` | `ascii`, `utf8`, `hex`, or `base64`; not `coap` |
 
-**DestinationArn**: State machine ARN (`arn:aws:states:{region}:{account}:stateMachine:{name}`)
-
-**IAM policy statement:**
+Never enable async invocation and response streaming together. Do not set both static and expression-derived tenant IDs without checking precedence in the deployed adapter. Tenant-aware batches are segmented by tenant before delivery. Validate the extracted tenant identifier; it must not become an accidental authorization boundary. Tenant isolation is not provided merely by setting an argument on an ordinary Lambda function.
 
 ```json
 {
-  "Effect": "Allow",
-  "Action": ["states:DescribeStateMachine", "states:StartSyncExecution"],
-  "Resource": ["<state machine ARN>"]
-}
-```
-
-Replace `states:StartSyncExecution` with `states:StartExecution` when targeting a STANDARD state machine.
-
-**Destination configuration:**
-
-```json
-{
-  "DestinationArn": { "Fn::GetAtt": ["CoapStateMachine", "Arn"] },
-  "Role": { "Arn": { "Fn::GetAtt": ["DestinationRole", "Arn"] } },
-  "Batching": { "Count": 1, "TimeoutInSeconds": 0.05 },
-  "Formatter": "coap",
-  "MetricsEnabled": true
-}
-```
-
-**Requirements:**
-- Both EXPRESS and STANDARD state machines are supported. Proxylity auto-detects the type via `states:DescribeStateMachine` — include that permission on the destination role.
-- EXPRESS state machines return `{ "Replies": [...] }` as output and support request/response.
-- STANDARD state machines are invoked asynchronously and cannot send replies.
-- No Lambda cold-start overhead; ~50ms per execution overhead for EXPRESS.
-
-**SAM resource example:**
-
-```json
-"MyStateMachine": {
-  "Type": "AWS::Serverless::StateMachine",
-  "Properties": {
-    "Type": "EXPRESS",
-    "DefinitionUri": "state-machine.asl.json",
-    "DefinitionSubstitutions": { "TableName": { "Ref": "MyTable" } },
-    "Role": { "Fn::GetAtt": ["StateMachineRole", "Arn"] },
-    "Logging": {
-      "Level": "ALL",
-      "IncludeExecutionData": true,
-      "Destinations": [{ "CloudWatchLogsLogGroup": { "LogGroupArn": { "Fn::GetAtt": ["ExecutionLogs", "Arn"] } } }]
-    }
+  "Arguments": {
+    "TenantIdExpression": "[0:4]",
+    "TenantIdFormatter": "hex",
+    "UseResponseStreaming": true
   }
 }
 ```
 
----
+Choose runtime versions supported by the target region and existing project. Go uses an OS-only runtime such as `provided.al2023`, not the retired managed `go1.x`. NativeAOT can reduce startup costs but is not a latency guarantee. For durable/background handlers, verify AWS runtime and invocation requirements separately.
 
-## Amazon EventBridge
+## Step Functions and API Gateway
 
-**DestinationArn**: A plain ARN referencing a specific region's event bus, or a region-keyed JSON object for multi-region listeners.
+Express is invoked synchronously; Standard starts asynchronously. Grant `states:DescribeStateMachine` for type detection. Standard cannot return immediate UDP replies, but a workflow can explicitly publish delayed packets through PacketSource.
 
-Plain ARN (single-region):
-```json
-"DestinationArn": "arn:aws:events:us-east-1:123456789012:event-bus/default"
-```
+API Gateway bridges to a configured **POST** method. Use IAM authentication and an HTTP/backend integration. REST APIs support VTL request/response transformation; HTTP APIs do not offer the same VTL mapping capability. A backend's arbitrary JSON response does not automatically become UDP replies: preserve tags and map it to the gateway response contract. Store third-party credentials in protected configuration, not committed mapping templates.
 
-Region-keyed map (multi-region):
-```json
-"DestinationArn": {
-  "us-east-1": "arn:aws:events:us-east-1:123456789012:event-bus/default",
-  "us-west-2": "arn:aws:events:us-west-2:123456789012:event-bus/default"
-}
-```
-
-Use `"*"` as a wildcard key for any unspecified region:
-
-```json
-"DestinationArn": { "*": "arn:aws:events:us-east-1:123456789012:event-bus/default" }
-```
-
-**IAM policy statement:**
+## SQS: format, groups, deduplication
 
 ```json
 {
-  "Effect": "Allow",
-  "Action": ["events:PutEvents"],
-  "Resource": ["arn:aws:events:{region}:{account}:event-bus/default"]
-}
-```
-
-**Each packet** becomes an EventBridge event with:
-- `source`: `"proxylity"`
-- `detail-type`: `"udp-gateway-packet-ingress"`
-- `detail`: the `RequestPacket` object
-
-**Create an EventBridge Rule** to process packets:
-
-```json
-"ProxylityRule": {
-  "Type": "AWS::Events::Rule",
-  "Properties": {
-    "EventPattern": {
-      "source": ["proxylity"],
-      "detail-type": ["udp-gateway-packet-ingress"]
-    },
-    "State": "ENABLED",
-    "Targets": [{ "Id": "MyTarget", "Arn": "..." }]
-  }
-}
-```
-
----
-
-## Amazon SQS (Standard Queue)
-
-**DestinationArn**: Queue ARN (`arn:aws:sqs:{region}:{account}:{name}`)
-
-**IAM policy statement:**
-
-```json
-{
-  "Effect": "Allow",
-  "Action": ["sqs:GetQueueUrl", "sqs:SendMessage"],
-  "Resource": ["<queue ARN>"]
-}
-```
-
-One `RequestPacket` per SQS message body (JSON).
-
----
-
-## Amazon SQS (FIFO Queue)
-
-**DestinationArn**: FIFO Queue ARN (must end in `.fifo`)
-
-**IAM policy statement:**
-
-```json
-{
-  "Effect": "Allow",
-  "Action": ["sqs:GetQueueUrl", "sqs:SendMessage"],
-  "Resource": ["<queue ARN>"]
-}
-```
-
-**FIFO requires a `MessageGroupIdExpression`** (under `Arguments`) to set the message group ID:
-
-```json
-{
-  "DestinationArn": { "Fn::GetAtt": ["DeviceQueue", "Arn"] },
-  "Role": { "Arn": "..." },
   "Arguments": {
     "MessageGroupIdExpression": "[0:4]",
-    "MessageGroupIdFormatter": "hex"
+    "MessageGroupIdFormatter": "hex",
+    "MessageDeduplicationIdExpression": "[4:8]",
+    "MessageDeduplicationIdFormatter": "hex"
   }
 }
 ```
 
-Messages with the same message group ID are delivered in order. See ARCHITECTURE.md for BREX syntax details.
+- For FIFO, configure an explicit `MessageGroupIdExpression`: the current control-plane validator requires it. Documentation describing an implicit default group is not sufficient to pass that validator.
+- Grouping can also support standard-queue fairness; fairness is not FIFO ordering.
+- The documented adapter assigns random deduplication IDs when no expression is set. Do not assume enabling queue content-based deduplication deduplicates UDP traffic. Prefer a bounded protocol/device/transaction ID; do not deduplicate legitimate identical heartbeats.
+- `Arguments.SendRaw` and `Arguments.UseMessageAttributes` change the default envelope. Verify consumer expectations, encoding, and SQS allowed-character limits before using raw mode for binary protocols.
+- FIFO orders accepted messages within a group; it does not repair ingress loss/reordering or guarantee exactly-once application effects. Keep consumers idempotent and configure queue redrive.
 
----
+## Kinesis
 
-## Amazon SNS
-
-**DestinationArn**: SNS topic ARN (`arn:aws:sns:{region}:{account}:{name}`)
-
-**IAM policy statement:**
-
-```json
-{
-  "Effect": "Allow",
-  "Action": ["sns:Publish"],
-  "Resource": ["<topic ARN>"]
-}
-```
-
-`sns:Publish` also grants access to `sns:PublishBatch`, which is used internally for efficient batch delivery. One `RequestPacket` per SNS message body (JSON). Both Standard and FIFO topics are supported.
-
----
-
-## Amazon Kinesis Data Streams
-
-**DestinationArn**: Kinesis stream ARN (`arn:aws:kinesis:{region}:{account}:stream/{name}`)
-
-**IAM policy statement:**
+Use `Arguments.PartitionKeyExpression` plus **`PartitionKeyExpressionFormatter`** (not `PartitionKeyFormatter`):
 
 ```json
 {
-  "Effect": "Allow",
-  "Action": ["kinesis:PutRecords"],
-  "Resource": ["<stream ARN>"]
-}
-```
-
-**Optional partition key** (for shard routing):
-
-```json
-{
-  "DestinationArn": { "Fn::GetAtt": ["DataStream", "Arn"] },
-  "Role": { "Arn": "..." },
   "Arguments": {
     "PartitionKeyExpression": "[0:4]",
     "PartitionKeyExpressionFormatter": "hex"
-  },
-  "Batching": { "Count": 500, "TimeoutInSeconds": 1 }
-}
-```
-
-Without `Arguments.PartitionKeyExpression`, Proxylity uses a random partition key (uniform distribution across shards).
-
----
-
-## Amazon Kinesis Data Firehose
-
-**DestinationArn**: Firehose delivery stream ARN (`arn:aws:firehose:{region}:{account}:deliverystream/{name}`)
-
-**IAM policy statement:**
-
-```json
-{
-  "Effect": "Allow",
-  "Action": ["firehose:PutRecord"],
-  "Resource": ["<delivery stream ARN>"]
-}
-```
-
-Packets are delivered as NDJSON (newline-delimited JSON), one `RequestPacket` per line. Common use: buffer to S3 (with optional Glacier tiering) or deliver to OpenSearch.
-
-**Firehose to S3 with encryption and WORM archival** — see `syslog/` example for a complete implementation including KMS encryption, S3 Object Lock (GOVERNANCE or COMPLIANCE mode), Glacier lifecycle transitions, and CloudWatch alarms.
-
----
-
-## Amazon DynamoDB
-
-**DestinationArn**: DynamoDB table ARN (`arn:aws:dynamodb:{region}:{account}:table/{name}`)
-
-**IAM policy statement:**
-
-```json
-{
-  "Effect": "Allow",
-  "Action": ["dynamodb:DescribeTable", "dynamodb:BatchWriteItem"],
-  "Resource": ["<table ARN>"]
-}
-```
-
-One DynamoDB item per `RequestPacket`. The primary key value is `"{remote_ip}:{remote_port} {local_ip}:{local_port}"` (space-separated); the sort key is the packet arrival time in ISO 8601 format. The primary and sort key attribute names are discovered automatically via `dynamodb:DescribeTable` and may be any names you choose. All `RequestPacket` properties are mapped to item attributes.
-
----
-
-## Amazon S3
-
-**DestinationArn**: S3 bucket ARN (`arn:aws:s3:::{bucket}`)
-
-**IAM policy statement:**
-
-```json
-{
-  "Effect": "Allow",
-  "Action": ["s3:PutObject"],
-  "Resource": ["arn:aws:s3:::{bucket}/*"]
-}
-```
-
-Packets are written as NDJSON objects. Objects are prefixed by date/time. Use lifecycle rules for Glacier archival and Object Lock for WORM compliance.
-
----
-
-## Amazon CloudWatch Logs
-
-**DestinationArn**: Log group ARN (`arn:aws:logs:{region}:{account}:log-group:{name}`)
-
-**IAM policy statement:**
-
-```json
-{
-  "Effect": "Allow",
-  "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
-  "Resource": ["<log group ARN>:*"]
-}
-```
-
-`Data` is written as the log message text (UTF-8). One log event per packet. Use CloudWatch Metric Filters on the log group to alert on patterns (e.g., syslog severity levels).
-
----
-
-## Amazon API Gateway (HTTP Bridge)
-
-**DestinationArn**: API Gateway invoke ARN
-
-**IAM policy statement:**
-
-```json
-{
-  "Effect": "Allow",
-  "Action": ["execute-api:Invoke"],
-  "Resource": ["arn:aws:execute-api:{region}:{account}:{api-id}/{stage}/{method}/{resource}"]
-}
-```
-
-API Gateway acts as a bridge from UDP to HTTP. Use Velocity Template Language (VTL) mapping templates in API Gateway to transform the `RequestPacket` into the HTTP request body and inject headers (e.g., `Authorization: Bearer <token>`). See `supabase-udp/` for a JWT-injection pattern using Step Functions for credential rotation.
-
----
-
-## AWS IoT Core
-
-**DestinationArn**: IoT topic rule ARN
-
-**IAM policy statement:**
-
-```json
-{
-  "Effect": "Allow",
-  "Action": ["iot:Publish"],
-  "Resource": ["arn:aws:iot:{region}:{account}:topic/{topic}"]
-}
-```
-
-**Static mode**: Each packet delivered as a JSON-encoded `RequestPacket` MQTT message.
-
-**Dynamic mode**: Raw binary payload only, no JSON wrapping — useful when IoT device firmware expects a specific binary format.
-
----
-
-## Complete DestinationRole Template (Lambda example)
-
-```json
-"DestinationRole": {
-  "Type": "AWS::IAM::Role",
-  "Properties": {
-    "AssumeRolePolicyDocument": {
-      "Version": "2012-10-17",
-      "Statement": [{
-        "Effect": "Allow",
-        "Principal": { "AWS": { "Fn::FindInMap": ["ProxylityConfig", {"Ref": "AWS::Region"}, "ServiceRole"] } },
-        "Action": "sts:AssumeRole"
-      }]
-    },
-    "Policies": [{
-      "PolicyName": "AllowLambdaInvoke",
-      "PolicyDocument": {
-        "Version": "2012-10-17",
-        "Statement": [
-          {
-            "Effect": "Allow",
-            "Action": ["lambda:InvokeFunction"],
-            "Resource": [{ "Fn::GetAtt": ["MyFunction", "Arn"] }]
-          },
-          {
-            "Effect": "Allow",
-            "Action": ["cloudwatch:PutMetricData"],
-            "Resource": "*"
-          }
-        ]
-      }
-    }]
   }
 }
 ```
 
-Add `cloudwatch:PutMetricData` with `Resource: "*"` whenever `"MetricsEnabled": true` is set on a destination — it is required for metrics reporting.
+Use device keys only when per-key grouping is required; skewed keys can create hot shards. Validate record and request size limits as well as count.
+
+## IoT Data
+
+The ARN identifies an MQTT **topic**, not a topic rule. Static mode publishes packet JSON. Dynamic mode publishes raw payload bytes to a topic below the ARN's base path:
+
+```json
+{
+  "Arguments": {
+    "DynamicTopicSuffix": true,
+    "TopicSuffixExpression": "[0:4]",
+    "TopicSuffixFormatter": "hex"
+  }
+}
+```
+
+Without the suffix expression, the documented suffix is `{source_ip}/{source_port}`. Scope `iot:Publish` to the base topic and intended subtopics. Verify generated topic names/lengths and use QoS 0 expectations; this is not guaranteed delivery.
+
+## Location trackers
+
+Example payload layout: 4-byte device ID, signed little-endian latitude and longitude in microdegrees:
+
+```json
+{
+  "Arguments": {
+    "DeviceIdExpression": "u32le[0:4]",
+    "LatitudeExpression": "i32le[4:8]",
+    "LongitudeExpression": "i32le[8:12]",
+    "ScaleFactor": 0.000001
+  }
+}
+```
+
+All three expressions are required. Prefer an explicit `ScaleFactor` matching the device protocol rather than relying on type-dependent angular defaults. Optional settings include `AccuracyExpression`, `TimestampExpression`, `PositionPropertyExpressions`, and **`TimeUnit`** (`seconds` or `milliseconds`). The current validator accepts `TimeUnit`; some website text instead says `TimestampTimeUnit`, which it rejects. Check actual adapter/deployment behavior before configuring a custom timestamp.
+
+Validate coordinate ranges, timestamp units, and device IDs with real packet fixtures. Position updates do not generate acknowledgments; add a separate processing destination if the protocol requires one.
+
+## EventBridge, storage, and logs
+
+- EventBridge event matching uses `source: ["proxylity"]` and `detail-type: ["udp-gateway-packet-ingress"]`; packet metadata lives in `detail`.
+- DynamoDB discovers key attribute names. The documented partition key value is `remote_ip:remote_port local_ip:local_port`, and the sort key is the arrival timestamp. Design for collisions, throughput, retention, and actual table schema rather than assuming an application-specific device key.
+- Firehose and S3 store NDJSON, not one object per datagram. Set size thresholds with JSON/base64 overhead and downstream API limits in mind.
+- Object Lock modes have materially different retention/deletion consequences. Never enable irreversible compliance retention without confirmation.
+- CloudWatch Logs as a packet destination is different from `LogGroupName` delivery-error logging. Gate raw payload capture, redact secrets, and set retention.

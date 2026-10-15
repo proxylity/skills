@@ -4,7 +4,9 @@ A portable [Agent Skill](https://agentskills.io/) that helps AI agents design, i
 
 ## What it does
 
-Guides agents through the full workflow — gathering requirements, choosing a pattern, generating CloudFormation/SAM templates, writing packet handler code (Lambda, Step Functions) or configuring direct destinations (EventBridge, SQS, Kinesis, DynamoDB, S3, Firehose, CloudWatch Logs, API Gateway), deploying, and testing. Covers WireGuard encryption, CoAP, batching, multi-region deployment, and the full UDP packet request/response format.
+Guides agents through requirements, CloudFormation/SAM infrastructure, Lambda and Step Functions handlers, direct AWS destinations, deployment, and round-trip testing. Covers UDP, WireGuard, DTLS, CoAP, BREX filtering/extraction, SNS PacketSource push, regional registration, IoT Data, Location trackers, and listener/destination observability.
+
+Includes current .NET SDK 2.x/template guidance, formatter-aware replies, Lambda async/streaming/tenant-isolation options, and availability-gated WebRTC guidance. [Verification notes](references/SOURCES.md) record the checked source revisions and known documentation discrepancies; local source support is not a deployment guarantee.
 
 ## Usage
 
@@ -12,14 +14,33 @@ This is a portable [Agent Skill](https://agentskills.io/) — compatible with Gi
 
 ## Requirements
 
-- An AWS account subscribed to [Proxylity UDP Gateway](https://aws.amazon.com/marketplace/pp/prodview-cpvl5wgt2yo2e) on AWS Marketplace
+- A Proxylity-enabled AWS account with the required subscription/access for the target region
 - AWS CLI configured with account credentials
-- SAM CLI (required only for compiled Lambda runtimes: .NET NativeAOT, Go, Java, Rust)
+- The handler's language toolchain when compiling code; a compatible Linux build environment for NativeAOT
+- SAM CLI when using the SAM build/deploy workflow (optional; compiled artifacts can also be packaged/deployed through other tooling)
+
+## Starter
+
+[assets/starter.template.json](assets/starter.template.json) provides a base64 UDP echo handler, explicit client CIDR parameter, delivery-error logging, metrics, and bounded log retention. It replies to every packet in a batch and safely handles empty batches. Supply the actual public client CIDR before deployment; the template has no open-access default.
+
+## Validation
+
+From the repository root, run:
+
+```text
+python tests/validate_skill.py
+node tests/validate_handlers.cjs
+cfn-lint udp-gateway/assets/starter.template.json
+```
+
+The Python checks use only the standard library; JavaScript checks require Node.js, and infrastructure linting requires an existing cfn-lint installation. Deployment and transport/session tests require an enabled AWS account and reachable client; local checks do not establish live service availability.
 
 ## Related
 
 - [Proxylity website](https://proxylity.com)
-- [proxylity/examples](https://github.com/proxylity/examples) — canonical working templates and handlers
+- [proxylity/examples](https://github.com/proxylity/examples) — application patterns (verify versions and assumptions before copying)
+- [proxylity/lambda-sdk-net](https://github.com/proxylity/lambda-sdk-net) — typed .NET handler contracts
+- [proxylity/templates-net](https://github.com/proxylity/templates-net) — .NET project scaffolding
 
 ## License
 

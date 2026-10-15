@@ -6,8 +6,8 @@
   "Parameters": {
     "ClientCidrToAllow": {
       "Type": "String",
-      "Default": "0.0.0.0/0",
-      "Description": "CIDR of clients allowed to send packets to this listener. Use a specific CIDR in production. REQUIRED — omitting ClientRestrictions blocks all traffic."
+      "MinLength": 1,
+      "Description": "Actual public source CIDR of allowed clients, for example 203.0.113.10/32. No public-access default. Omitting ClientRestrictions blocks traffic."
     }
   },
 
@@ -26,31 +26,49 @@
 
   "Resources": {
 
+    "HandlerLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "RetentionInDays": 14
+      }
+    },
+
+    "DeliveryErrorLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "RetentionInDays": 14
+      }
+    },
+
     "PacketHandler": {
       "Type": "AWS::Serverless::Function",
       "Properties": {
-        "Policies": ["AWSLambdaBasicExecutionRole"],
+        "Policies": [{
+          "Statement": [{
+            "Effect": "Allow",
+            "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+            "Resource": { "Fn::GetAtt": ["HandlerLogs", "Arn"] }
+          }]
+        }],
         "Runtime": "nodejs22.x",
         "Handler": "index.handler",
         "MemorySize": 512,
         "Timeout": 10,
+        "LoggingConfig": {
+          "LogGroup": { "Ref": "HandlerLogs" }
+        },
         "InlineCode": {
           "Fn::Join": ["\n", [
-            "// Starter handler — replace with your own logic.",
-            "// event.Messages is an array of RequestPacket objects.",
-            "// Return { Replies: [...] } to send UDP responses, or { Replies: [] } for fire-and-forget.",
             "exports.handler = async (event) => {",
-            "  console.log('Received', event.Messages.length, 'packets');",
-            "  for (const msg of event.Messages) {",
-            "    const bytes = Buffer.from(msg.Data, 'base64');",
-            "    console.log(`From ${msg.Remote.IpAddress}:${msg.Remote.Port} — ${bytes.length} bytes`);",
+            "  if (!Array.isArray(event.Messages)) {",
+            "    throw new TypeError('Expected UDP Gateway Messages array');",
             "  }",
-            "  // Echo the first packet back as an example response.",
-            "  // Remove or replace the Replies array for your use case.",
-            "  const replies = [{ Tag: event.Messages[0].Tag, Data: event.Messages[0].Data }];",
-            "  return { Replies: replies };",
+            "  console.log('Received', event.Messages.length, 'packets');",
+            "  return {",
+            "    Replies: event.Messages.map(msg => ({ Tag: msg.Tag, Data: msg.Data }))",
+            "  };",
             "};"
-          ]}
+          ]]
         }
       }
     },
@@ -71,7 +89,7 @@
           }]
         },
         "Policies": [{
-          "PolicyName": "AllowLambdaAndMetrics",
+          "PolicyName": "AllowLambdaMetricsAndDeliveryLogs",
           "PolicyDocument": {
             "Version": "2012-10-17",
             "Statement": [
@@ -83,7 +101,17 @@
               {
                 "Effect": "Allow",
                 "Action": ["cloudwatch:PutMetricData"],
-                "Resource": "*"
+                "Resource": "*",
+                "Condition": {
+                  "StringEquals": {
+                    "cloudwatch:namespace": "Proxylity/UDP Gateway"
+                  }
+                }
+              },
+              {
+                "Effect": "Allow",
+                "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+                "Resource": { "Fn::GetAtt": ["DeliveryErrorLogs", "Arn"] }
               }
             ]
           }
@@ -109,11 +137,12 @@
           "DestinationArn": { "Fn::GetAtt": ["PacketHandler", "Arn"] },
           "Role": { "Arn": { "Fn::GetAtt": ["DestinationRole", "Arn"] } },
           "Batching": {
-            "Count": 1000,
-            "TimeoutInSeconds": 1
+            "Count": 10,
+            "TimeoutInSeconds": 0.05
           },
           "Formatter": "base64",
-          "MetricsEnabled": true
+          "MetricsEnabled": true,
+          "LogGroupName": { "Ref": "DeliveryErrorLogs" }
         }]
       }
     }
