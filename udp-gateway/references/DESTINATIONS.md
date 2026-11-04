@@ -17,7 +17,7 @@ All examples below are destination fragments, not complete templates. Each desti
 | Data Firehose | `arn:aws:firehose:REGION:ACCOUNT:deliverystream/NAME` | `firehose:PutRecord` | NDJSON batch |
 | DynamoDB | `arn:aws:dynamodb:REGION:ACCOUNT:table/NAME` | `dynamodb:DescribeTable`, `dynamodb:BatchWriteItem` | Packet properties mapped to an item |
 | S3 | `arn:aws:s3:::BUCKET` | `s3:PutObject` on `arn:aws:s3:::BUCKET/*` | NDJSON objects |
-| CloudWatch Logs | `arn:aws:logs:REGION:ACCOUNT:log-group:NAME` | `logs:CreateLogStream`, `logs:PutLogEvents` on log streams | UTF-8 packet text, one log event per packet |
+| CloudWatch Logs | `arn:aws:logs:REGION:ACCOUNT:log-group:NAME` | `logs:CreateLogStream`, `logs:PutLogEvents` on log streams | Text formatter: prefixed payload text; protocol-aware formatter: request-packet JSON; one event per packet |
 | AWS IoT Data | `arn:aws:iot:REGION:ACCOUNT:topic/PATH` | `iot:Publish` | Packet JSON, or binary payload in dynamic mode |
 | Location tracker | `arn:aws:geo:REGION:ACCOUNT:tracker/NAME` | `geo:BatchUpdateDevicePosition` | Device position updates extracted with BREX |
 
@@ -42,7 +42,11 @@ Destination roles may additionally need:
 }
 ```
 
-`Formatter` is per destination: `base64`, `hex`, `utf8`, `ascii`, or `coap`. `FilterExpression` is also per destination and is evaluated before delivery. See architecture for BREX, regional ARN maps, batching, and metric semantics.
+`Formatter` is per destination: `base64`, `hex`, `utf8`, `ascii`, `coap`, `coap+`, or `syslog`. The first four produce string `Data`; the protocol-aware formatters produce object `Data` for requests, replies, and PacketSource messages. Choose `coap+` for content-aware CoAP or `syslog` for RFC 5424/3164 fields. See the [packet contract](./PACKET-FORMAT.md) for payload types, migration, and parse/encoding errors.
+
+Structured fields can be consumed without Lambda: DynamoDB stores `Data` as a map, EventBridge/SNS can filter fields, and S3/Firehose NDJSON can be queried as structs in Athena. CloudWatch Logs protocol-aware destinations write the full JSON request packet without the text formatter's prefix; Logs Insights can query `Data.severity`, `Data.hostname`, etc. Use `utf8` on a separate destination when original syslog text is wanted. Enable delivery-error logs/metrics and handle malformed records explicitly.
+
+`FilterExpression` is also per destination and is evaluated before delivery; it is a BREX expression over packet bytes, not a JSON-field EventBridge pattern. See architecture for regional ARN maps, batching, and metric semantics. For CDK, prefer [specialized L2 destinations](./CDK.md) to derive delivery IAM; caller-supplied roles and `ArnDestination` require explicit permissions.
 
 ## Lambda: sync, async, streaming, tenants
 
@@ -54,7 +58,7 @@ All options belong under `Arguments`:
 | `UseResponseStreaming: true` | Invoke with response stream; requires a streaming implementation |
 | `TenantId` | Static tenant ID for a Lambda function configured for tenant isolation |
 | `TenantIdExpression` | BREX-derived tenant ID |
-| `TenantIdFormatter` | `ascii`, `utf8`, `hex`, or `base64`; not `coap` |
+| `TenantIdFormatter` | `ascii`, `utf8`, `hex`, or `base64`; not `coap`, `coap+`, or `syslog` |
 
 Never enable async invocation and response streaming together. Do not set both static and expression-derived tenant IDs without checking precedence in the deployed adapter. Tenant-aware batches are segmented by tenant before delivery. Validate the extracted tenant identifier; it must not become an accidental authorization boundary. Tenant isolation is not provided merely by setting an argument on an ordinary Lambda function.
 

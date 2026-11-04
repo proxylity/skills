@@ -1,6 +1,6 @@
 # Handler implementation
 
-The examples below state their formatter explicitly. Do not combine a base64-only handler with `Formatter: coap` or `utf8`. See the packet-format reference for other encodings.
+The examples below state their formatter explicitly. Do not combine a base64-only handler with `Formatter: coap`, `coap+`, `syslog`, or `utf8`. Protocol-aware formatters deliver object-valued `Data`; read fields directly and return objects, without JSON-stringifying them. See the [packet-format reference](./PACKET-FORMAT.md) for encoding and error handling.
 
 ## Node.js: base64 echo
 
@@ -155,7 +155,7 @@ Important SDK details:
 - `UdpGatewayBatchRequest.Messages` and response `Replies` are lists, not arrays.
 - `message.DataString` maps to wire JSON `Data`; `message.Data` is decoded `byte[]`. Do not base64-decode it again.
 - `message.Reply(bytes)` preserves the tag/formatter and supplies reply metadata. SDK 2.x's semantic reply methods replace older raw-byte handler returns.
-- The SDK byte decoder supports `base64`, `hex`, `utf8`, `ascii`, **not `coap`**. For CoAP use a raw JSON handler and the formatter's structured contract.
+- The checked SDK byte decoder supports `base64`, `hex`, `utf8`, `ascii`, not protocol-aware object `Data` (`coap`, `coap+`, `syslog`). Use a raw JSON handler for those formats unless the installed SDK explicitly supports them. The CDK NuGet package is infrastructure tooling, not a replacement handler SDK.
 - Use **`UdpGatewayLambdaJsonSerializer`**, not the default AWS serializer, for the SDK models. It includes source-generated serialization and handles empty base64 payloads.
 - `ProcessAsync` runs per-message handlers in parallel and converts per-message exceptions to no-reply results. Do not assume that throwing inside a handler fails the whole Lambda batch. Explicitly log/measure failures; if batch failure is required, implement that policy instead of relying on this helper.
 - Do not assume SDK models retain every wire metadata field. Use a raw event model when you need fields such as `Inner` or ingress routing context that the typed model does not expose.

@@ -40,6 +40,15 @@ class SkillTests(unittest.TestCase):
                     f"Broken link in {path.relative_to(ROOT)}: {target}",
                 )
 
+    def test_coap_discovery_guidance(self):
+        text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        description = json.loads(re.search(r'(?m)^description: (".*")$', text).group(1))
+        for phrase in ["constrained-device", "sensor telemetry", "device commands", "HTTP/MQTT"]:
+            self.assertIn(phrase, description)
+        self.assertIn("(./references/COAP.md)", text)
+        self.assertIn("before inventing a custom datagram protocol", text)
+        self.assertIn("rather than assuming UDP is always preferable", text)
+
     def test_json_examples_parse(self):
         count = 0
         for path in SKILL.rglob("*.md"):
@@ -69,6 +78,62 @@ class SkillTests(unittest.TestCase):
             handler({"Messages": None}, None)
         with self.assertRaises(ValueError):
             handler({"Messages": [{"Tag": "bad", "Data": "***"}]}, None)
+
+    def test_protocol_formatter_reply_examples(self):
+        examples = [
+            json.loads(source)
+            for source in blocks(SKILL / "references" / "PACKET-FORMAT.md", "json")
+        ]
+        replies = [
+            reply
+            for example in examples
+            for reply in example.get("Replies", [])
+            if isinstance(reply["Data"], dict)
+        ]
+        self.assertEqual(len(replies), 2)
+        for reply in replies:
+            data = reply["Data"]
+            self.assertTrue(reply["Tag"])
+            self.assertEqual(data["Type"], 2)
+            self.assertIsInstance(data["MessageId"], int)
+            base64.b64decode(data["Token"], validate=True)
+            if "ContentFormat" in data:
+                self.assertEqual(data["ContentFormat"], 60)
+                self.assertEqual(data["Payload"], {"0": "accepted"})
+                self.assertNotIn("PayloadDecoded", data)
+            else:
+                self.assertEqual(base64.b64decode(data["Payload"], validate=True), b"hello")
+                option = next(item for item in data["Options"] if item["Number"] == 12)
+                self.assertEqual(
+                    int.from_bytes(base64.b64decode(option["Value"], validate=True), "big"),
+                    0,
+                )
+
+    def test_syslog_formatter_examples(self):
+        examples = [
+            json.loads(source)
+            for source in blocks(SKILL / "references" / "PACKET-FORMAT.md", "json")
+        ]
+        parsed = next(item for item in examples if "schema_version" in item)
+        self.assertEqual(set(parsed), {
+            "schema_version", "parse_ok", "format", "pri", "facility", "severity",
+            "facility_name", "severity_name", "version", "timestamp", "hostname",
+            "app_name", "proc_id", "msg_id", "structured_data", "message", "raw",
+        })
+        self.assertEqual(parsed["schema_version"], 1)
+        self.assertTrue(parsed["parse_ok"])
+        self.assertEqual(parsed["facility"], parsed["pri"] >> 3)
+        self.assertEqual(parsed["severity"], parsed["pri"] & 7)
+        self.assertIsNone(parsed["raw"])
+        outbound = next(
+            message
+            for example in examples
+            for message in example.get("Messages", [])
+            if message.get("Formatter") == "syslog"
+        )
+        self.assertEqual(outbound["Remote"], {"Address": "203.0.113.10", "Port": 514})
+        self.assertIsInstance(outbound["Data"], dict)
+        self.assertEqual(outbound["Data"]["severity_name"], "err")
 
     def test_starter_access_logging_and_formatter(self):
         template = json.loads((SKILL / "assets" / "starter.template.json").read_text(encoding="utf-8"))

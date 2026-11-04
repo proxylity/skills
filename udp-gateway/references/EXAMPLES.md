@@ -14,7 +14,7 @@ Paths are relative to that repository. Verify the selected revision before copyi
 | `packet-counter-cpp` | Native C++ handler | Toolchain and Lambda runtime packaging |
 | `packet-counter-sfn` | Express processing without Lambda | ASL/JSONata validity and empty/single/multi-item output shape |
 | `packet-counter-multi-region` | Global/regional split | Destination names/registration properties and state ownership |
-| `coap-time-service` | CoAP formatting, Express workflow, Observe, PacketSource | Numeric CoAP types, stringified replies, subscription expiry, ingress-region persistence |
+| `coap-time-service` | CoAP formatting, Express workflow, Observe, PacketSource | Numeric CoAP types, current object-valued `Data` contract, subscription expiry, ingress-region persistence |
 | `coap-demo` | More extensive CoAP, block-wise/Observe/deferred response patterns | Application state/retry semantics; not automatic gateway block-wise support |
 | `wireguard-echo` | Raw inner-IP ICMP/UDP service implementation | `DecapsulatedHandler`, complete IP replies/checksums, old SDK package pins |
 | `wireguard-iot-device` | WireGuard-connected device/application integration | Client firmware, keys, outer CIDR vs inner address |
@@ -24,7 +24,7 @@ Paths are relative to that repository. Verify the selected revision before copyi
 | `kinesis-streams` | Stream ingestion and partition extraction | `PartitionKeyExpressionFormatter`, skew, record quotas |
 | `location-service` | Direct binary telemetry to Location trackers | Signed coordinate units, explicit scaling, `TimeUnit` validator discrepancy |
 | `mavlink` | Binary telemetry filtering and BREX routing | MAVLink version/offsets and truncated-packet fixtures |
-| `syslog` | Encrypted logging, Firehose/S3, Logs | Retention/Object Lock, payload privacy, KMS/IAM, format and size limits |
+| `syslog` | Encrypted logging, Firehose/S3, Logs | Choose `syslog` for parsed JSON fields or `utf8` for text; handle `parse_ok: false`, retention/Object Lock, privacy, KMS/IAM, size limits |
 | `dns-filter` | DNS parsing and multi-region application logic | DNS semantics, timeouts, state consistency, dependencies |
 | `radius` | RADIUS application/tunnel patterns | Authentication, secrets, protocol integrity, old SDK package pins |
 | `packet-capture` | Live packet display with browser-facing components | Redact payloads, restrict capture access, explicitly disable after debugging |
@@ -34,6 +34,10 @@ Paths are relative to that repository. Verify the selected revision before copyi
 | `multi-modal` / `blink` | Additional application/device patterns | Read actual transport and infrastructure; do not infer capabilities from names |
 
 There is no `mavlink-fifo` directory in the checked revision: use `mavlink` and `sqs`. A `dtls` directory is not required to use DTLS; some examples expose transport parameters. Do not fabricate filenames or assume each example implements every transport.
+
+Older CoAP examples may stringify `Data` or describe content decoding under `coap`. Adapt them to the [current packet contract](./PACKET-FORMAT.md): protocol-aware `Data` is an object; `coap` keeps base64 payloads, and `coap+` decodes recognized Content-Formats. For CDK apps, use the [published constructs](./CDK.md) rather than manually translating every sample custom resource.
+
+For new CoAP applications, begin with the [CoAP design guide](./COAP.md) and its bounded, read-only `coap+` example. Extend to Observe/deferred/block-transfer patterns only after designing their state, authentication, and failure handling.
 
 ## Current .NET scaffolding
 

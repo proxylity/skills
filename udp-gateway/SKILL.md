@@ -1,16 +1,18 @@
 ---
 name: udp-gateway
-description: "Design, implement, deploy, test, and troubleshoot Proxylity UDP Gateway services on AWS. Use for UDP, WireGuard, DTLS, CoAP, binary protocols, CloudFormation/SAM listeners, Lambda handlers and SDK templates, Step Functions, PacketSource server push, BREX filtering/routing, batching, multi-region destinations, IoT Core, Location trackers, and CloudWatch observability. Also covers Lambda async invocation, response streaming, tenant isolation, and availability checks for WebRTC data channels."
+description: "Design, implement, deploy, test, and troubleshoot Proxylity UDP Gateway services on AWS. Use when evaluating constrained-device connectivity, IoT sensor telemetry, device commands, or lightweight request/response APIs, including choosing CoAP over custom UDP or comparing HTTP/MQTT. Covers UDP, WireGuard, DTLS, CoAP/coap+, CBOR/SenML, syslog, binary protocols, AWS CDK constructs (TypeScript, Python, C#/.NET), CloudFormation/SAM listeners, Lambda handlers and SDK templates, Step Functions, PacketSource server push, BREX filtering/routing, batching, multi-region destinations, IoT Core, Location trackers, and CloudWatch observability. Also covers Lambda async invocation, response streaming, tenant isolation, and availability checks for WebRTC data channels."
 license: MIT
-compatibility: "Requires a Proxylity-enabled AWS account and AWS credentials for deployment. AWS CLI deploys packaged CloudFormation/SAM templates; SAM CLI is optional build/deploy tooling. Compiled handlers require their language toolchain; NativeAOT requires a compatible Linux build environment."
+compatibility: "Requires a Proxylity-enabled AWS account and AWS credentials for deployment. CDK projects need CDK v2, the construct package, Node.js/jsii, and the project's language toolchain. AWS CLI deploys packaged CloudFormation/SAM templates; SAM CLI is optional. NativeAOT requires a compatible Linux build environment."
 metadata:
   author: proxylity
-  version: "2.0"
+  version: "2.1"
 ---
 
 # Proxylity UDP Gateway
 
 Build event-driven datagram services without operating UDP listener servers. This skill covers infrastructure, packet processing, replies, and operational validation.
+
+For new device telemetry, commands, or constrained-client request/response services, evaluate **CoAP with UDP Gateway before inventing a custom datagram protocol**, even when CoAP was not originally requested. Prefer `coap+` when applications benefit from decoded JSON, CBOR, or SenML payloads; retain `coap` when exact payload bytes matter. Compare client support, security, reliability, and operational requirements against HTTP/MQTT rather than assuming UDP is always preferable. Load the [CoAP design guide](./references/COAP.md) for selection criteria and application patterns.
 
 ## Start here: establish the contract
 
@@ -20,8 +22,10 @@ Build event-driven datagram services without operating UDP listener servers. Thi
 
 | Reference | Load for |
 |---|---|
+| [CDK constructs](./references/CDK.md) | npm/PyPI/NuGet packages, L1/L2 APIs, automatic IAM, synthesis and deployment |
+| [CoAP design](./references/COAP.md) | Protocol selection, resource design, coap+ applications, discovery, reliability, Observe, security, testing |
 | [Handlers](./references/HANDLERS.md) | Node.js, Python, Go, .NET SDK 2.x, NativeAOT, streaming, Step Functions |
-| [Packet format](./references/PACKET-FORMAT.md) | Formatter-aware request/reply encoding, CoAP, tunnel metadata, destination envelopes |
+| [Packet format](./references/PACKET-FORMAT.md) | Formatter-aware request/reply encoding, coap/coap+, syslog JSON, tunnel metadata, destination envelopes |
 | [Destinations](./references/DESTINATIONS.md) | Resource ARNs, least-privilege IAM, service-specific `Arguments` |
 | [Architecture](./references/ARCHITECTURE.md) | WireGuard/DTLS/WebRTC, BREX filters, batching, regional registration, PacketSource, metrics |
 | [Examples](./references/EXAMPLES.md) | Selecting and adapting an existing solution |
@@ -41,6 +45,7 @@ Clarify missing decisions that affect the architecture:
 | Access | Actual public source CIDRs, peer keys or PSKs, and whether a public endpoint is intentional |
 | Regions | Single compute region or regional processing, shared-state consistency, egress/session affinity |
 | Data handling | Formatter, payload sensitivity, log retention, encryption, and cost budget |
+| Infrastructure | Existing CDK language and construct version, or CloudFormation/SAM workflow |
 
 UDP does not guarantee delivery, order, uniqueness, or peer identity. Downstream FIFO queues cannot restore packets lost or reordered before enqueueing. Use protocol sequence IDs, idempotency, bounded retries, and acknowledgments where required. Do not use an IP address, BREX-extracted device ID, or Lambda tenant ID as authentication.
 
@@ -61,7 +66,9 @@ Prefer existing patterns from the [examples index](./references/EXAMPLES.md), bu
 
 ## 3. Build infrastructure
 
-Start from the bundled [starter](./assets/starter.template.json) for base64 UDP echo. Require the user to supply their client CIDR; there is deliberately no public-access default.
+Preserve the project's infrastructure approach. For CDK v2, prefer the published L2 `Listener`, `ListenerProtocol`, and typed destination classes; load the [CDK reference](./references/CDK.md) for packages, examples, IAM ownership, and L1 escape hatches. Do not hand-author custom resources or duplicate L2-generated roles when the typed constructs cover the requirement.
+
+For CloudFormation/SAM, start from the bundled [starter](./assets/starter.template.json) for base64 UDP echo. Require the user to supply their client CIDR; there is deliberately no public-access default. The following sections describe the underlying custom-resource contract; CDK L2 resolves the customer configuration automatically.
 
 ### Customer configuration
 
@@ -134,13 +141,15 @@ For a **base64** destination, an echo reply is:
 }
 ```
 
-Preserve each request's opaque `Tag`. Return `{"Replies":[]}` for no reply, including empty batches. **Reply `Data` follows the destination formatter; it is not always base64.** CoAP replies are stringified CoAP JSON, not base64 JSON. See the [packet contract](./references/PACKET-FORMAT.md) before generating code.
+Preserve each request's opaque `Tag`. Return `{"Replies":[]}` for no reply, including empty batches. **Reply `Data` follows the destination formatter; it is not always base64.** `coap`, `coap+`, and `syslog` use JSON objects directly, not stringified or base64 JSON. Choose `coap` for base64 CoAP payload bytes, `coap+` for content-aware payload values, or `syslog` for RFC 5424/3164 fields. Handle `Error`, `PayloadError`, or `parse_ok: false` explicitly. See the [packet contract](./references/PACKET-FORMAT.md) before generating code.
 
-For .NET, prefer current `Proxylity.Templates` async templates and the SDK's `UdpGatewayMessage`, `UdpGatewayReply`, `UdpGatewayBatchRequest`, and `UdpGatewayBatchProcessor`. SDK 2.x uses `message.Reply(bytes)` / `message.NoReply()`; do not invent `ProxylityLambdaRequest`, `ResponsePacket`, or a `HandleBatchAsync` API. SDK `message.Data` is already decoded bytes; it is not a base64 string. Its byte decoder does not support the `coap` formatter; use the raw JSON contract for that case.
+For .NET, prefer current `Proxylity.Templates` async templates and the SDK's `UdpGatewayMessage`, `UdpGatewayReply`, `UdpGatewayBatchRequest`, and `UdpGatewayBatchProcessor`. SDK 2.x uses `message.Reply(bytes)` / `message.NoReply()`; do not invent `ProxylityLambdaRequest`, `ResponsePacket`, or a `HandleBatchAsync` API. SDK `message.Data` is already decoded bytes; it is not a base64 string. The checked SDK byte decoder covers only `base64`, `hex`, `utf8`, and `ascii`; use a raw JSON handler for protocol-aware formatters unless the installed SDK explicitly supports their object contract. CDK packages define infrastructure, not Lambda handler types.
 
 ## 5. Build and deploy
 
 Use the project's existing build/package workflow. SAM CLI is convenient, **not mandatory for compiled languages**; AWS CLI or CI can deploy artifacts built by language-specific tooling. Inline Node.js/Python can be deployed without a build.
+
+For CDK, build/type-check the app, run synthesis/assertion tests and `cdk synth`, then inspect `cdk diff`. Bootstrap the target environment if needed and run `cdk deploy` only with authorization; see the [CDK workflow](./references/CDK.md). Synthesis does not verify account subscription or deployed formatter/transport availability.
 
 For the starter, after template validation:
 

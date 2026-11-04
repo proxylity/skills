@@ -95,7 +95,7 @@ Common forms include byte slices, typed little-/big-endian reads, dynamic offset
 - `i32le[4:8]`: signed 32-bit little-endian field.
 - `[:]`: whole payload.
 
-Argument formatters are `ascii`, `utf8`, `hex`, and `base64`; **not `coap`**. Names vary: SQS `MessageGroupIdFormatter`, Lambda `TenantIdFormatter`, IoT `TopicSuffixFormatter`, Kinesis **`PartitionKeyExpressionFormatter`**.
+Argument formatters are `ascii`, `utf8`, `hex`, and `base64`; **not `coap`, `coap+`, or `syslog`**. Names vary: SQS `MessageGroupIdFormatter`, Lambda `TenantIdFormatter`, IoT `TopicSuffixFormatter`, Kinesis **`PartitionKeyExpressionFormatter`**.
 
 For WireGuard, confirm which inner bytes the selected decapsulation path supplies before choosing offsets. Test short/truncated packets, unsupported versions, invalid offsets, signed values, byte order, and all conditional branches. The control plane checks many property types but does not fully validate BREX syntax; successful stack creation is not proof that expressions work.
 
