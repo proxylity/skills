@@ -208,10 +208,12 @@ A successful send alone proves neither delivery nor a working reply. Report what
 
 ## 7. Operate and troubleshoot
 
-1. **No ingress:** check account/region availability, endpoint, outer source CIDR, transport handshake, certificate/peer configuration, and `FilterExpression`.
-2. **Ingress but no delivery:** check ARN mapping/registration, role trust, action/resource/KMS permissions, throttling, destination error logs, and service payload quotas.
+1. **No listener ingress:** check account/region availability, endpoint, outer source CIDR, and suspension. Listener filtered counters identify firewall/suspension drops; admitted invalid transport packets still count as ingress.
+2. **Listener ingress but no destination delivery:** check destination role policy, trust and action/resource/KMS permissions, transport handshake, certificate/peer configuration, destination `FilterExpression`, queueing, ARN mapping/registration, throttling, destination error logs, and service payload quotas. Listener ingress alone does not prove integration delivery.
 3. **Delivery but no reply:** check sync vs async mode, exact `Tag`, formatter, valid response framing, tunnel addressing, NAT state, and client receive timeout.
 4. **PacketSource no delivery:** check `Remote.Address` (not inbound `IpAddress`), `EgressRegion` as an SNS attribute, active tunnel/session, and required `PeerKey`/`Inner`.
 5. **Latency/cost:** measure batching delay, cold/warm runtime behavior, backend execution, cross-region routing, and packet sizes. Do not promise fixed cold-start times, latency floors, automatic application-health failover, or a fixed cost-reduction multiplier.
 
-Listener and destination metrics are independent, not roll-ups. Inspect the proper scope and region, application errors, and delivery logs together. Synchronous Lambda errors, async retries, and downstream queue redrive have different semantics; configure and test each applicable failure path.
+Listener ingress counts the admitted integration and protocol datagrams before protocol processing; firewall-denied and suspended-listener datagrams count only as filtered. Listener egress counts every successfully sent datagram, including integration replies and PacketSource originated, at its transport-encoded length. Listener, destination and source counters overlap; never sum them as unique traffic or infer delivery-success rates from their ratios. Packet units are `max(1, ceil(recorded byte length / 1024))`, not raw datagram counts. PacketSource publishes only `EgressPackets` and `EgressBytes` with dimension `PacketSource=<source_id>`, using the bound listener's `MetricsEnabled` setting and observability role; separate `PSRC` usage records remain available. Source egress counts application bytes before transport encoding. See [Architecture](./references/ARCHITECTURE.md#observability) for byte boundaries and calculations.
+
+Inspect the proper scope and region, application errors, and delivery logs together. Synchronous Lambda errors, async retries, and downstream queue redrive have different semantics; configure and test each applicable failure path.

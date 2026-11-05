@@ -162,6 +162,25 @@ class SkillTests(unittest.TestCase):
             "Proxylity/UDP Gateway",
         )
 
+    def test_listener_metrics_accounting(self):
+        skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        architecture = (SKILL / "references" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+        for text in [skill, architecture]:
+            self.assertIn("before protocol processing", text)
+            self.assertIn("suspended-listener datagrams count only as", text)
+            self.assertIn("every successfully sent datagram", text)
+            self.assertIn("Listener and destination/source counters overlap", text)
+            self.assertIn("max(1, ceil(recorded byte length / 1024))", text)
+            self.assertIn("PacketSource publishes only `EgressPackets` and `EgressBytes`", text)
+            self.assertIn("`PacketSource=<source_id>`", text)
+            self.assertIn("bound listener's `MetricsEnabled` setting and observability role", text)
+            self.assertNotIn("metrics are independent, not roll-ups", text)
+        self.assertIn("FilteredBytes / (IngressBytes + FilteredBytes)", architecture)
+        self.assertIn("for a nonzero denominator", architecture)
+        self.assertIn("1056-byte datagram is one destination/source egress unit but two listener egress units", architecture)
+        self.assertIn("Invalid transport packets admitted on an active listener remain ingress", architecture)
+        self.assertIn("not once per control datagram or retransmission", architecture)
+
     def test_asl_contract_is_jsonata(self):
         definitions = [
             json.loads(source)
