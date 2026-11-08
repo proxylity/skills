@@ -6,7 +6,7 @@ A portable [Agent Skill](https://agentskills.io/) that helps AI agents design, i
 
 Guides agents through requirements, AWS CDK or CloudFormation/SAM infrastructure, Lambda and Step Functions handlers, direct AWS destinations, deployment, and round-trip testing. Covers UDP, WireGuard, DTLS, CoAP/coap+, syslog JSON, BREX filtering/extraction, SNS PacketSource push, regional registration, IoT Data, Location trackers, and listener/destination observability.
 
-Includes current .NET SDK 2.x/template guidance, formatter-aware replies, Lambda async/streaming/tenant-isolation options, and availability-gated WebRTC guidance. [Verification notes](references/SOURCES.md) record the checked source revisions and known documentation discrepancies; local source support is not a deployment guarantee.
+Includes current .NET SDK 2.x/template guidance, formatter-aware replies, Lambda async/streaming/tenant-isolation options, Lambda MicroVM image destinations (IAM, run hook, HTTP handler contract), and availability-gated WebRTC guidance. [Verification notes](references/SOURCES.md) record the checked source revisions and known documentation discrepancies; local source support is not a deployment guarantee.
 
 [CDK guidance](references/CDK.md) covers the npm, PyPI, and NuGet construct packages, L1/L2 selection, automatic IAM and escape hatches, and synthesis/deployment checks. The [packet reference](references/PACKET-FORMAT.md) covers object-valued protocol `Data`, content-aware CoAP migration, syslog field processing/sending, and malformed-packet handling.
 

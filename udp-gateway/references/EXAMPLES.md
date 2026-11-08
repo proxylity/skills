@@ -12,6 +12,7 @@ Paths are relative to that repository. Verify the selected revision before copyi
 | `packet-counter-python` | Python variant | Runtime support and formatter |
 | `packet-counter-go` | Compiled Go handler | Linux architecture, bootstrap packaging/build metadata |
 | `packet-counter-cpp` | Native C++ handler | Toolchain and Lambda runtime packaging |
+| `lambda-microvm` | Lambda MicroVM image destination: SAM `AWS::Serverless::MicrovmImage`, Node.js HTTP app on port 8080, `/ready` and `/run` hooks, per-tenant MicroVMs | MicroVM availability in the region, destination role grants, first packets dropped while the MicroVM starts, idle suspend/resume latency |
 | `packet-counter-sfn` | Express processing without Lambda | ASL/JSONata validity and empty/single/multi-item output shape |
 | `packet-counter-multi-region` | Global/regional split | Destination names/registration properties and state ownership |
 | `coap-time-service` | CoAP formatting, Express workflow, Observe, PacketSource | Numeric CoAP types, current object-valued `Data` contract, subscription expiry, ingress-region persistence |

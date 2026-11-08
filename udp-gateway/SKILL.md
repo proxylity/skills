@@ -1,11 +1,11 @@
 ---
 name: udp-gateway
-description: "Design, implement, deploy, test, and troubleshoot Proxylity UDP Gateway services on AWS. Use when evaluating constrained-device connectivity, IoT sensor telemetry, device commands, or lightweight request/response APIs, including choosing CoAP over custom UDP or comparing HTTP/MQTT. Covers UDP, WireGuard, DTLS, CoAP/coap+, CBOR/SenML, syslog, binary protocols, AWS CDK constructs (TypeScript, Python, C#/.NET), CloudFormation/SAM listeners, Lambda handlers and SDK templates, Step Functions, PacketSource server push, BREX filtering/routing, batching, multi-region destinations, IoT Core, Location trackers, and CloudWatch observability. Also covers Lambda async invocation, response streaming, tenant isolation, and availability checks for WebRTC data channels."
+description: "Design, implement, deploy, test, and troubleshoot Proxylity UDP Gateway services on AWS. Use when evaluating constrained-device connectivity, IoT sensor telemetry, device commands, or lightweight request/response APIs, including choosing CoAP over custom UDP or comparing HTTP/MQTT. Covers UDP, WireGuard, DTLS, CoAP/coap+, CBOR/SenML, syslog, binary protocols, AWS CDK constructs (TypeScript, Python, C#/.NET), CloudFormation/SAM listeners, Lambda handlers and SDK templates, Lambda MicroVM image destinations, Step Functions, PacketSource server push, BREX filtering/routing, batching, multi-region destinations, IoT Core, Location trackers, and CloudWatch observability. Also covers Lambda async invocation, response streaming, tenant isolation, and availability checks for WebRTC data channels."
 license: MIT
 compatibility: "Requires a Proxylity-enabled AWS account and AWS credentials for deployment. CDK projects need CDK v2, the construct package, Node.js/jsii, and the project's language toolchain. AWS CLI deploys packaged CloudFormation/SAM templates; SAM CLI is optional. NativeAOT requires a compatible Linux build environment."
 metadata:
   author: proxylity
-  version: "2.1"
+  version: "2.2"
 ---
 
 # Proxylity UDP Gateway
@@ -40,7 +40,7 @@ Clarify missing decisions that affect the architecture:
 | Transport | Exactly one of `udp`, `wg`, `dtls`, or availability-verified `webrtc` per listener |
 | Protocol | Binary layout, byte order, maximum datagram size, version, authentication, retries, duplicate handling |
 | Response | Synchronous replies, streaming replies during execution, delayed/server-initiated push, or no reply |
-| Destination | Lambda, Step Functions, API Gateway, SNS, SQS, Kinesis, Firehose, DynamoDB, S3, Logs, IoT Data, Location tracker |
+| Destination | Lambda, Lambda MicroVM images, Step Functions, API Gateway, SNS, SQS, Kinesis, Firehose, DynamoDB, S3, Logs, IoT Data, Location tracker |
 | Performance | Measured latency budget, expected packet/byte rate, burst rate, and acceptable loss |
 | Access | Actual public source CIDRs, peer keys or PSKs, and whether a public endpoint is intentional |
 | Regions | Single compute region or regional processing, shared-state consistency, egress/session affinity |
@@ -57,10 +57,11 @@ Existing UDP protocols are a good fit; protocols such as QUIC, RTP, or DTLS pass
 - **Request/response:** synchronous Lambda, Step Functions **Express**, or an API Gateway POST endpoint returning `Replies`.
 - **Incremental replies:** Lambda `Arguments.UseResponseStreaming: true`, with a streaming-capable handler and the correct JSON stream contract.
 - **Background work:** Lambda `Arguments.UseAsyncInvoke: true` or Step Functions **Standard**. Return values do not send replies; use PacketSource for later delivery.
+- **Long-lived, stateful or non-function workloads:** a Lambda MicroVM image destination (`arn:aws:lambda:REGION:ACCOUNT:microvm-image:NAME[:VERSION]`). Proxylity starts MicroVMs from the image (optionally one per tenant) and posts batches to an HTTP application on port 8080. See [MicroVM destinations](./references/DESTINATIONS.md#lambda-microvm-images).
 - **Server push:** SNS-backed PacketSource with explicit remote addressing, formatter, and an `EgressRegion` message attribute.
 - **Encrypted native clients:** choose WireGuard for IP tunneling or DTLS for clients that speak DTLS. Neither is universally faster or a substitute for the other's protocol.
 
-Streaming and async Lambda invocation are mutually exclusive. Tenant isolation is a separate Lambda feature and requires a tenant-enabled function plus a valid static or BREX-derived tenant identifier.
+Streaming and async Lambda invocation are mutually exclusive. These two options apply to Lambda functions only; a MicroVM image destination rejects them. MicroVM images use `TenantId*` to start one MicroVM per tenant. Tenant isolation is a separate Lambda feature and requires a tenant-enabled function plus a valid static or BREX-derived tenant identifier.
 
 Prefer existing patterns from the [examples index](./references/EXAMPLES.md), but verify their package versions, IAM policies, and protocol assumptions before copying.
 

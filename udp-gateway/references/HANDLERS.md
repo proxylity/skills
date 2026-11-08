@@ -239,3 +239,24 @@ Set `Arguments.UseResponseStreaming: true` and use an AWS-supported response-str
 The response contract is still a JSON object containing a `Replies` array. Emit reply objects incrementally within that array, preserve each `Tag`, use the destination formatter, and finish valid JSON. Do not substitute SSE, NDJSON, HTTP metadata framing, or raw UDP bytes unless the deployed adapter explicitly supports it. Test a first reply before function completion and additional replies, not just a final buffered response.
 
 Use a runtime-supported streaming API (for example Node's `awslambda.streamifyResponse` in Lambda). Ordinary .NET SDK batch-return handlers above are buffered and do not implement streaming. Keep `UseAsyncInvoke` false and grant `lambda:InvokeFunction`. Account for function timeout, client reachability/session lifetime, backpressure, and AWS streaming charges/quotas.
+
+## Lambda MicroVM HTTP application
+A MicroVM image destination runs an ordinary HTTP server, not a Lambda handler. Listen on **port 8080** (fixed). Proxylity POSTs `{"Messages":[...]}` using the same request packet objects as Lambda functions, and the application returns HTTP 200 with `{"Replies":[{"Tag":"<message Tag>","Data":"..."}]}` (an empty array when there is no reply). Preserve each `Tag` and encode `Data` with the destination `Formatter` (`base64` by default). A MicroVM keeps its memory between requests, so per-client state can live in the process; it is lost when the MicroVM is terminated (at most 8 hours), so persist anything durable elsewhere.
+
+Optional lifecycle hooks must be served on a **different port** (the example uses 9000) so they cannot be reached with the port 8080 token Proxylity holds. In SAM, enable `Hooks.MicrovmHooks.Run`; Lambda requires the `/ready` build hook whenever a hook is enabled, and routes traffic only after `/run` returns. Lambda POSTs `{"microvmId":"...","runHookPayload":"<JSON string>"}` to the run hook (path `/aws/lambda-microvms/runtime/v1/run` in the example). Proxylity's payload contains `Version`, `DestinationName`, `ImageArn`, `TenantId` (or null), `Region`, `Formatter`, `Port`, `StartedAt` and `ExtraData` (the `RunHookExtraData` argument, or null), never credentials. Read per-MicroVM values in `/run`, not at startup: the image is snapshotted after startup, so startup values are identical in every MicroVM. Keep `/run` free of once-per-tenant side effects (a duplicate MicroVM can start briefly), and return an error from `/run` only to deliberately fail the start.
+
+```js
+const http = require('http');
+http.createServer((req, res) => {
+  const chunks = [];
+  req.on('data', (c) => chunks.push(c));
+  req.on('end', () => {
+    const { Messages = [] } = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+    const Replies = Messages.map((m) => ({ Tag: m.Tag, Data: m.Data })); // echo
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ Replies }));
+  });
+}).listen(8080);
+```
+
+Use the `lambda-microvm` example for a complete image (Dockerfile, hooks and SAM template). Do not return non-2xx for ordinary packet problems; a failed delivery makes Proxylity check the MicroVM state, and errors on a running MicroVM never start a new one.

@@ -7,6 +7,7 @@ All examples below are destination fragments, not complete templates. Each desti
 | Destination | ARN resource form | Delivery IAM actions | Delivered content |
 |---|---|---|---|
 | Lambda | `arn:aws:lambda:REGION:ACCOUNT:function:NAME[:QUALIFIER]` | `lambda:InvokeFunction` | `{"Messages":[...]}` |
+| Lambda MicroVM image | `arn:aws:lambda:REGION:ACCOUNT:microvm-image:NAME[:VERSION]` | `lambda:RunMicrovm`, `GetMicrovm`, `ResumeMicrovm`, `TerminateMicrovm`, `GetMicrovmImage`, `GetMicrovmImageVersion`, `CreateMicrovmAuthToken` on the image; `lambda:PassNetworkConnector`; `iam:PassRole` for `ExecutionRoleArn` | `{"Messages":[...]}` POSTed over HTTPS to port 8080; `Replies` response |
 | Step Functions Express | `arn:aws:states:REGION:ACCOUNT:stateMachine:NAME` | `states:DescribeStateMachine`, `states:StartSyncExecution` | Batch envelope; synchronous `Replies` output |
 | Step Functions Standard | Same | `states:DescribeStateMachine`, `states:StartExecution` | Batch envelope; no synchronous replies |
 | API Gateway | `arn:aws:execute-api:REGION:ACCOUNT:API/STAGE/POST/PATH` | `execute-api:Invoke` | Batch envelope; map HTTP response to `Replies` |
@@ -74,6 +75,66 @@ Never enable async invocation and response streaming together. Do not set both s
 
 Choose runtime versions supported by the target region and existing project. Go uses an OS-only runtime such as `provided.al2023`, not the retired managed `go1.x`. NativeAOT can reduce startup costs but is not a latency guarantee. For durable/background handlers, verify AWS runtime and invocation requirements separately.
 
+## Lambda MicroVM images
+
+A [Lambda MicroVM](https://docs.aws.amazon.com/lambda/latest/dg/lambda-microvms-guide.html) is a Linux environment built from an image you provide that keeps its memory between requests until it is suspended or terminated. Use it for per-client or per-tenant in-memory state, software that does not fit the function model, or an existing HTTP application. For stateless packet handling a Lambda function is simpler. The destination is the **image** ARN, not a running MicroVM. Proxylity starts MicroVMs from the image when packets arrive, so the first packets for a tenant can be dropped or answered late; send several when testing.
+
+| Argument (all optional) | Meaning |
+|---|---|
+| `ExecutionRoleArn` | Role the MicroVM runs with; assumable by `lambda.amazonaws.com`. Needed for the application to call AWS and for stdout/stderr to reach CloudWatch Logs |
+| `IdleDurationSeconds` | Seconds without packets before suspension (default `900`; clamped to 60-28800; the integer is passed as a string in CloudFormation). Suspended MicroVMs resume on the next packet, adding latency |
+| `RunHookExtraData` | Up to 2048 characters delivered to the `/run` hook as `ExtraData`. No secrets |
+| `EgressNetworkConnectorArns` | List of 1-10 customer-managed Lambda network connector ARNs (optionally `:VERSION`-qualified) used for outbound traffic. Omit for Lambda's default, which is public internet egress. A list is the only way to restrict egress, for example a VPC connector with no internet route |
+| `TenantId`, `TenantIdExpression`, `TenantIdFormatter` | One MicroVM per tenant, as for Lambda functions. Without them all packets go to one MicroVM |
+
+`UseResponseStreaming` and `UseAsyncInvoke` are rejected for MicroVM image ARNs, and the MicroVM arguments are rejected for other destination types. Other MicroVM lifecycle settings (port, token lifetime, auto-resume) are not configurable.
+
+```yaml
+DestinationRole:   # Proxylity ServiceRole trust omitted
+  Policies:
+    - PolicyName: microvm
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - lambda:RunMicrovm
+              - lambda:GetMicrovm
+              - lambda:ResumeMicrovm
+              - lambda:TerminateMicrovm
+              - lambda:GetMicrovmImage
+              - lambda:GetMicrovmImageVersion
+              - lambda:CreateMicrovmAuthToken
+            Resource: !GetAtt EchoMicrovmImage.ImageArn   # AWS::Serverless::MicrovmImage
+          - Effect: Allow
+            Action: lambda:PassNetworkConnector
+            Resource:
+              - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:aws:network-connector:aws-network-connector:HTTP_INGRESS"
+              - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:aws:network-connector:aws-network-connector:INTERNET_EGRESS"
+          - Effect: Allow            # only when ExecutionRoleArn is set
+            Action: iam:PassRole
+            Resource: !GetAtt MicrovmExecutionRole.Arn
+            Condition:
+              StringEquals:
+                iam:PassedToService: lambda.amazonaws.com
+# Destination
+DestinationArn: !GetAtt EchoMicrovmImage.ImageArn
+Arguments:
+  IdleDurationSeconds: "900"
+  TenantIdExpression: "u8[0] >> 6 ?? 0"
+  TenantIdFormatter: hex
+  ExecutionRoleArn: !GetAtt MicrovmExecutionRole.Arn
+```
+
+Notes:
+
+- `lambda:PassNetworkConnector` is required for every connector `RunMicrovm` attaches, including Lambda's defaults. With no `EgressNetworkConnectorArns`, grant the AWS-managed `HTTP_INGRESS` and `INTERNET_EGRESS` connectors. With it, egress connectors replace the default internet egress: grant `HTTP_INGRESS` plus the customer connector ARNs (and their unversioned ARNs if version-qualified) and omit `INTERNET_EGRESS`, so the role cannot start MicroVMs with internet access. The connector itself needs an operator role (`ec2:CreateNetworkInterface`, `ec2:CreateTags`) owned by the customer. Without internet or VPC endpoints the application cannot reach AWS APIs whatever the execution role allows; omit `ExecutionRoleArn` or grant only what the endpoints serve. Connectors cannot change on a running MicroVM; a change reaches MicroVMs started afterward.
+- MicroVM actions are authorized against the image ARN. If the ARN is version-pinned (`...:NAME:3`), also grant the unversioned image ARN so image lookups stay authorized. With no version suffix, MicroVMs started after a new version is published use it; running MicroVMs are not replaced. Proxylity re-reads the version at most once a minute.
+- If the image cannot be read (missing `GetMicrovmImage`/`GetMicrovmImageVersion`), Proxylity logs a warning and starts MicroVMs without choosing a version and without the run hook payload.
+- Do not grant MicroVM shell access to the destination role; it needs only the actions above.
+- Lifetime is at most 8 hours (running plus suspended). After a failed delivery Proxylity replaces a terminated MicroVM and resumes a suspended one; a running MicroVM is left alone, so application errors never start new MicroVMs. A MicroVM terminated within 5 minutes of starting (for example a failing `/run` hook) is not replaced for 5 minutes and its packets are dropped; the reason goes to the destination's `LogGroupName`.
+- Several Proxylity nodes can start a MicroVM for the same tenant at once; one is used and the rest are terminated. Keep `/run` hooks free of once-per-tenant side effects.
+- Application handler contract and run hook payload: see [HANDLERS.md](./HANDLERS.md#lambda-microvm-http-application). In SAM, declare the image with `AWS::Serverless::MicrovmImage` (see the `lambda-microvm` example). CDK: `LambdaMicrovmDestination` ([CDK.md](./CDK.md)). Terraform: `idle_duration_seconds`, `execution_role_arn`, `run_hook_extra_data`, `egress_network_connector_arns` under `arguments`.
 ## Step Functions and API Gateway
 
 Express is invoked synchronously; Standard starts asynchronously. Grant `states:DescribeStateMachine` for type detection. Standard cannot return immediate UDP replies, but a workflow can explicitly publish delayed packets through PacketSource.
