@@ -14,7 +14,7 @@ Includes current .NET SDK 2.x/template guidance, formatter-aware replies, Lambda
 
 ## Usage
 
-This is a portable [Agent Skill](https://agentskills.io/) — compatible with GitHub Copilot, Claude Code, Cursor, Gemini CLI, and [many other agents](https://agentskills.io/#clients). Clone or reference the `udp-gateway/` folder and point your agent at it following your agent's skill installation instructions.
+This is a portable [Agent Skill](https://agentskills.io/) — compatible with GitHub Copilot, Claude Code, Cursor, Gemini CLI, and [many other agents](https://agentskills.io/#clients). Clone or reference the `skills/udp-gateway/` folder and point your agent at it following your agent's skill installation instructions.
 
 ## Requirements
 
@@ -35,7 +35,7 @@ From the repository root, run:
 ```text
 python tests/validate_skill.py
 node tests/validate_handlers.cjs
-cfn-lint udp-gateway/assets/starter.template.json
+cfn-lint skills/udp-gateway/assets/starter.template.json
 ```
 
 The Python checks use only the standard library; JavaScript checks require Node.js, and infrastructure linting requires an existing cfn-lint installation. Deployment and transport/session tests require an enabled AWS account and reachable client; local checks do not establish live service availability.

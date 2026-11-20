@@ -9,7 +9,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "udp-gateway"
+SKILL = ROOT / "skills" / "udp-gateway"
 
 
 def blocks(path, language):

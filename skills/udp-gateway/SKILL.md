@@ -156,7 +156,7 @@ For the starter, after template validation:
 
 ```bash
 aws cloudformation deploy \
-  --template-file udp-gateway/assets/starter.template.json \
+  --template-file skills/udp-gateway/assets/starter.template.json \
   --stack-name my-udp-service \
   --parameter-overrides ClientCidrToAllow=203.0.113.10/32 \
   --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \

@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const root = path.resolve(__dirname, "..", "udp-gateway");
+const root = path.resolve(__dirname, "..", "skills", "udp-gateway");
 const template = JSON.parse(
   fs.readFileSync(path.join(root, "assets", "starter.template.json"), "utf8")
 );
