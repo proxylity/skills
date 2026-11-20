@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "proxylity-udp-gateway",
-  "version": "2.2.0",
+  "version": "1.0.2",
   "description": "Design, deploy, and troubleshoot Proxylity UDP Gateway services on AWS: UDP, WireGuard, DTLS, and CoAP listeners with Lambda and other destinations.",
   "author": {
     "name": "Proxylity",
